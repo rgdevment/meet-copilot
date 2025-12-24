@@ -1,0 +1,352 @@
+import time
+import os
+import threading
+import queue
+from datetime import datetime
+from collections import deque
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox, font
+import sys
+
+# Módulos propios
+import teams_stream_capture as tsc
+import realtime_translator as rt
+from openai import OpenAI
+
+# === CONFIGURACIÓN ===
+LM_STUDIO_URL = "http://localhost:1234/v1"
+MODEL_NAME = "local-model"
+OUTPUT_DIR = "reuniones_logs"
+
+# === PALETA DE COLORES (VS CODE DARK THEME) ===
+COLORS = {
+    "bg_main":      "#1e1e1e", # Fondo principal
+    "bg_panel":     "#252526", # Fondo cajas texto
+    "fg_text":      "#d4d4d4", # Texto normal
+    "fg_accent":    "#007acc", # Azul VS Code
+    "fg_live":      "#4ec9b0", # Verde Cybertruck
+    "fg_trans":     "#ce9178", # Naranja suave
+    "fg_ai":        "#9cdcfe", # Azul claro
+    "fg_dim":       "#858585", # Gris logs
+    "border":       "#3e3e42"  # Bordes sutiles
+}
+
+# === ESTADO GLOBAL ===
+class AppState:
+    def __init__(self):
+        self.status = "Esperando configuración..."
+        self.source_lang = "es"
+        self.target_lang = "en"
+        self.is_shutting_down = False
+        self.source_name = "Teams Capture"
+
+state = AppState()
+# Colas Thread-Safe
+gui_queue = queue.Queue()
+text_process_queue = queue.Queue()
+
+ai_stop_event = threading.Event()
+capture_stop_event = threading.Event()
+
+# === HELPERS ===
+def get_llm_client():
+    return OpenAI(base_url=LM_STUDIO_URL, api_key="lm-studio")
+
+def generate_filename(prefix):
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    return f"{OUTPUT_DIR}/{prefix}_{timestamp}.md"
+
+# === LÓGICA IA ===
+def process_smart_segment(client, full_payload):
+    system_prompt = """
+    Eres un Tech Lead. Genera BITÁCORA TÉCNICA (Español).
+    INPUT: Contexto + Segmento.
+    INSTRUCCIONES:
+    1. Limpia OCR ("vakap"->"Backup", "Jaison"->"JSON").
+    2. Usa estilo directo y técnico.
+
+    OUTPUT:
+    [TEMA]
+    > Clave: ...
+    > Acuerdos: ...
+    """
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": full_payload}],
+            temperature=0.2,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Error IA: {str(e)}"
+
+def generate_final_summary(client, full_minutes_text):
+    gui_queue.put(("status", "🧠 Generando Resumen Final..."))
+    system_prompt = "Eres Arquitecto de Software. Genera REPORTE EJECUTIVO FINAL (Markdown)."
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": full_minutes_text}],
+            temperature=0.4,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Error Resumen: {str(e)}"
+
+# === WORKER IA ===
+def ai_worker(file_min, file_raw, translator):
+    client = get_llm_client()
+    all_minutes_text = []
+
+    # Init Archivos
+    with open(file_raw, "w", encoding="utf-8") as f:
+        f.write(f"# RAW DATA - {datetime.now()}\n\n")
+    with open(file_min, "w", encoding="utf-8") as f:
+        f.write(f"# BITÁCORA TÉCNICA - {datetime.now()}\n\n")
+
+    gui_queue.put(("status", "🟢 Sistemas Listos. Escuchando..."))
+
+    while not ai_stop_event.is_set() or not text_process_queue.empty():
+        try:
+            if state.is_shutting_down:
+                q_size = text_process_queue.qsize()
+                gui_queue.put(("status", f"🛑 Cierre: Procesando {q_size} bloques pendientes..."))
+
+            payload_text = text_process_queue.get(timeout=0.5)
+            ts = datetime.now().strftime('%H:%M')
+
+            if not state.is_shutting_down:
+                gui_queue.put(("status", f"⚡ Procesando bloque {ts}..."))
+
+            # 1. RAW
+            with open(file_raw, "a", encoding="utf-8") as f:
+                f.write(f"\n{payload_text}\n")
+                f.flush()
+                os.fsync(f.fileno())
+
+            # 2. IA
+            minute_txt = process_smart_segment(client, payload_text)
+
+            # Archivo
+            formatted_entry = f"\n## ⏱️ {ts}\n{minute_txt}\n"
+            all_minutes_text.append(formatted_entry)
+            with open(file_min, "a", encoding="utf-8") as f:
+                f.write(formatted_entry)
+                f.flush()
+                os.fsync(f.fileno())
+
+            # GUI (LIFO)
+            clean_ui = minute_txt.replace("### ", "").replace("**", "").replace("labels:", "").strip()
+            gui_queue.put(("ai_new", f"⏱️ {ts}\n{clean_ui}\n{'-'*40}\n"))
+
+            text_process_queue.task_done()
+
+        except queue.Empty:
+            continue
+        except Exception as e:
+            gui_queue.put(("status", f"Error IA: {e}"))
+
+    # Resumen Final
+    if all_minutes_text:
+        summary = generate_final_summary(client, "".join(all_minutes_text))
+        gui_queue.put(("status", "💾 Guardando Resumen en Disco..."))
+        with open(file_min, "a", encoding="utf-8") as f:
+            f.write("\n" + "="*40 + "\n")
+            f.write(summary)
+            f.write("\n" + "="*40 + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        gui_queue.put(("status", "✅ Reunión Finalizada y Guardada."))
+    else:
+        gui_queue.put(("status", "⚠️ Finalizado sin datos."))
+
+    gui_queue.put(("shutdown_complete", True))
+
+# === WORKER CAPTURA ===
+def capture_worker(translator):
+    def on_smart_block(payload):
+        text_process_queue.put(payload)
+
+    def on_live_feed(text_buffer):
+        gui_queue.put(("live", text_buffer))
+        try:
+            if len(text_buffer) > 2:
+                trans = translator.translate_text(text_buffer[-600:])
+                gui_queue.put(("trans", trans))
+        except:
+            pass
+
+    state.source_name = "Teams Capture"
+    tsc.start_headless_capture(on_smart_block, on_live_feed, capture_stop_event)
+
+# === GUI CONFIG ===
+def ask_config_gui():
+    config_win = tk.Tk()
+    config_win.title("Configuración")
+    config_win.geometry("300x150")
+    config_win.configure(bg=COLORS["bg_main"])
+
+    # Centrar en pantalla
+    config_win.eval('tk::PlaceWindow . center')
+
+    selection = {"source": "es", "target": "en"}
+
+    tk.Label(config_win, text="Idioma de la Reunión:", bg=COLORS["bg_main"], fg="white", font=("Segoe UI", 11)).pack(pady=15)
+
+    def set_es():
+        selection["source"], selection["target"] = "es", "en"
+        config_win.destroy()
+
+    def set_en():
+        selection["source"], selection["target"] = "en", "es"
+        config_win.destroy()
+
+    btn_style = {"bg": COLORS["fg_accent"], "fg": "white", "font": ("Segoe UI", 10, "bold"), "bd": 0, "padx": 20, "pady": 5, "cursor": "hand2"}
+
+    tk.Button(config_win, text="🇪🇸 ESPAÑOL", command=set_es, **btn_style).pack(pady=5)
+    tk.Button(config_win, text="🇺🇸 INGLÉS", command=set_en, **btn_style).pack(pady=5)
+
+    config_win.mainloop()
+    return selection["source"], selection["target"]
+
+
+# === GUI APP PRINCIPAL ===
+class MeetCopilotApp(tk.Tk):
+    def __init__(self, source_lang, target_lang):
+        super().__init__()
+
+        self.title("AI Meeting Architect | Pro Edition")
+        self.geometry("1100x750")
+        self.configure(bg=COLORS["bg_main"])
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Configurar Grid
+        self.columnconfigure(0, weight=6) # 60%
+        self.columnconfigure(1, weight=4) # 40%
+        self.rowconfigure(1, weight=1)    # Alto dinámico
+
+        # 1. HEADER
+        self.header_var = tk.StringVar(value="Iniciando motores...")
+        header_frame = tk.Frame(self, bg=COLORS["fg_accent"], height=35)
+        header_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
+        header_frame.pack_propagate(False)
+
+        lbl_header = tk.Label(header_frame, textvariable=self.header_var, bg=COLORS["fg_accent"], fg="white", font=("Segoe UI", 11, "bold"))
+        lbl_header.pack(expand=True)
+
+        # 2. COLUMNA IZQUIERDA
+        left_frame = tk.Frame(self, bg=COLORS["bg_main"])
+        left_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        left_frame.rowconfigure(1, weight=1)
+        left_frame.rowconfigure(3, weight=1)
+        left_frame.columnconfigure(0, weight=1)
+
+        self.create_label(left_frame, "🔊 AUDIO EN VIVO", COLORS["fg_live"], 0)
+        self.txt_live = self.create_text_area(left_frame, COLORS["fg_live"], 1)
+
+        self.create_label(left_frame, f"🌐 TRADUCCIÓN ({target_lang.upper()})", COLORS["fg_trans"], 2)
+        self.txt_trans = self.create_text_area(left_frame, COLORS["fg_trans"], 3)
+
+        # 3. COLUMNA DERECHA
+        right_frame = tk.Frame(self, bg=COLORS["bg_main"])
+        right_frame.grid(row=1, column=1, sticky="nsew", padx=(0, 10), pady=10)
+        right_frame.rowconfigure(1, weight=1)
+        right_frame.columnconfigure(0, weight=1)
+
+        self.create_label(right_frame, "🤖 BITÁCORA TÉCNICA (LIFO)", COLORS["fg_ai"], 0)
+        self.txt_ai = self.create_text_area(right_frame, COLORS["fg_ai"], 1)
+
+        # 4. FOOTER
+        self.log_var = tk.StringVar(value="Esperando eventos...")
+        lbl_log = tk.Label(self, textvariable=self.log_var, bg="#333333", fg="#aaaaaa", font=("Consolas", 9), anchor="w", padx=10)
+        lbl_log.grid(row=2, column=0, columnspan=2, sticky="ew")
+
+        self.check_queue()
+
+    def create_label(self, parent, text, color, row):
+        lbl = tk.Label(parent, text=text, bg=COLORS["bg_main"], fg=color, font=("Segoe UI", 10, "bold"), anchor="w")
+        lbl.grid(row=row, column=0, sticky="ew", pady=(5, 0))
+
+    def create_text_area(self, parent, text_color, row):
+        # AQUÍ ESTÁ EL ARREGLO: wrap=tk.WORD
+        txt = scrolledtext.ScrolledText(
+            parent,
+            bg=COLORS["bg_panel"],
+            fg=text_color,
+            insertbackground="white",
+            font=("Consolas", 11),
+            borderwidth=0,
+            wrap=tk.WORD,
+            highlightthickness=1,
+            highlightbackground=COLORS["border"],
+            highlightcolor=COLORS["fg_accent"]
+        )
+        txt.grid(row=row, column=0, sticky="nsew", pady=(2, 5))
+        return txt
+
+    def check_queue(self):
+        try:
+            while True:
+                action, data = gui_queue.get_nowait()
+
+                if action == "live":
+                    self.txt_live.delete("1.0", tk.END)
+                    self.txt_live.insert(tk.END, data)
+                    self.txt_live.see(tk.END)
+
+                elif action == "trans":
+                    self.txt_trans.delete("1.0", tk.END)
+                    self.txt_trans.insert(tk.END, data)
+                    self.txt_trans.see(tk.END)
+
+                elif action == "ai_new":
+                    self.txt_ai.insert("1.0", data + "\n")
+
+                elif action == "status":
+                    self.header_var.set(data)
+
+                elif action == "shutdown_complete":
+                    self.destroy()
+
+        except queue.Empty:
+            pass
+
+        delay = 50 if state.is_shutting_down else 100
+        self.after(delay, self.check_queue)
+
+    def on_close(self):
+        if state.is_shutting_down: return
+
+        if messagebox.askokcancel("Finalizar Reunión", "¿Desea detener la captura y generar el resumen final?"):
+            state.is_shutting_down = True
+            self.header_var.set("🛑 DETENIENDO... (VACIANDO MEMORIA)")
+            threading.Thread(target=perform_shutdown_sequence).start()
+
+def perform_shutdown_sequence():
+    capture_stop_event.set()
+    ai_stop_event.set()
+
+# === MAIN ENTRY POINT ===
+def main():
+    s_lang, t_lang = ask_config_gui()
+
+    state.source_lang = s_lang
+    state.target_lang = t_lang
+
+    translator = rt.RealTimeTranslator(state.source_lang, state.target_lang)
+    file_raw = generate_filename("RAW")
+    file_min = generate_filename("MINUTA")
+
+    t_ai = threading.Thread(target=ai_worker, args=(file_min, file_raw, translator), daemon=True)
+    t_capture = threading.Thread(target=capture_worker, args=(translator,), daemon=True)
+
+    t_ai.start()
+    t_capture.start()
+
+    app = MeetCopilotApp(s_lang, t_lang)
+    app.mainloop()
+
+if __name__ == "__main__":
+    main()

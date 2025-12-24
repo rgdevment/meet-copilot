@@ -1,63 +1,117 @@
-# Vision Copilot v9 - Guía de Usuario
+# Meet Copilot Pro - AI Meeting Architect (GUI Edition)
 
-Este asistente técnico utiliza inteligencia artificial y visión por computadora para capturar, traducir y resumir tus reuniones en tiempo real.
+Aplicación de escritorio para orquestar reuniones inteligentes en Windows. Utiliza automatización de UI para capturar subtítulos de Microsoft Teams, procesarlos con Inteligencia Artificial Local (LM Studio) y generar documentación técnica en tiempo real.
 
-## Instalacion Rapida (Clean Setup)
+> **NOTA IMPORTANTE:** Esta versión (v2.0) soporta **EXCLUSIVAMENTE MICROSOFT TEAMS** como fuente de audio/texto.
 
-1. **Clonar el repo y entrar a la carpeta.**
-2. **Crear y activar el entorno aislado:**
-   python -m venv .venv
-   .\.venv\Scripts\activate
-3. **Instalar dependencias desde el manifiesto:**
-   pip install -r requirements.txt
+## Características Técnicas
+
+* **Interfaz:** GUI Nativa (Tkinter) con Modo Oscuro (VS Code Theme). Estabilidad total sin parpadeos.
+* **Captura:** `uiautomation` sobre el DOM de Teams (Scraping de Accessibility Tree).
+* **IA:** Conexión a LM Studio vía API compatible con OpenAI (Localhost).
+* **Procesamiento:** Lógica LIFO (Last In First Out) para visualización y colas FIFO para procesamiento de archivos.
+* **Traducción:** Instantánea en hilo dedicado.
+* **Salida:** Archivos Markdown (.md) para Raw Data y Bitácora Técnica.
+
+## Requisitos Previos
+
+1.  **Sistema Operativo:** Windows 10 o 11 (Obligatorio para `uiautomation`).
+2.  **Python:** Versión 3.10 o superior.
+3.  **LM Studio:** Instalado y ejecutando un servidor local.
+4.  **Microsoft Teams:** Aplicación de escritorio (Nueva o Clásica) con **Subtítulos en Vivo activados** durante la reunión.
+
+## Estructura del Proyecto
+
+* `main_meeting_ai.py`: Entry point. Gestiona la GUI, hilos de IA y orquestación.
+* `teams_stream_capture.py`: Módulo de bajo nivel para leer la memoria de la ventana de Teams.
+* `realtime_translator.py`: Servicio de traducción (Google/DeepL wrapper).
+* `reuniones_logs/`: Directorio de salida automática.
+
+## Instalación
+
+1.  Clona el repositorio:
+    ```bash
+    git clone <tu-repo>
+    cd meet-copilot
+    ```
+
+2.  Crea y activa el entorno virtual:
+    ```bash
+    python -m venv .venv
+    .venv\Scripts\activate
+    ```
+
+3.  Instala las dependencias:
+    Usa el archivo `requirements.txt` y ejecuta `pip install -r requirements.txt`:
+
+## Configuración de LM Studio (Critico)
+
+Para que el Tech Lead funcione:
+1.  Carga un modelo ligero pero capaz (ej: `Llama-3-8B-Instruct-v2` o `Mistral-Nemo`).
+2.  Ve a la pestaña **Developer/Server** (icono `<->`).
+3.  **Context Length:** Ajústalo a `8192` (necesario para el resumen final).
+4.  **Port:** `1234` (default).
+5.  Presiona **Start Server**.
+
+## Ejecución
+
+### Método 1: Consola
+```bash
+python main_meeting_ai.py
+
+## Ejecucion Rapida (Lanzador de Escritorio)
 
 
-## 1. Requisitos Previos
-- **Python 3.11** instalado en Windows.
-- **LM Studio** (opcional, para resúmenes con Llama 3).
-- **Windows Live Captions** activo (disponible en Windows 11).
 
-## 2. Configuración de Permisos y Entorno
-Para evitar errores de seguridad al ejecutar scripts en Windows, sigue estos pasos en tu terminal PowerShell (como administrador):
+Para ejecutar el asistente con un doble clic desde tu escritorio sin abrir consolas manualmente, crea un archivo .bat:
 
-1. **Habilitar ejecución de scripts:**
-   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
-2. **Crear el entorno virtual (VENV):**
-   Ve a la carpeta del proyecto y ejecuta:
-   python -m venv .venv
 
-3. **Activar el entorno:**
-   .\.venv\Scripts\activate
-   (Sabrás que está activo porque verás "(.venv)" al inicio de la línea de comandos).
+1. Abre el Bloc de Notas.
 
-## 3. Instalación de Librerías
-Con el entorno virtual activado, instala solo lo necesario:
+2. Pega el siguiente codigo:
 
-pip install "numpy<2.0" easyocr opencv-python pyautogui deep-translator openai rich requests (o requirements.txt)
 
-## 4. Configuración de Windows Live Captions
-El script lee una zona específica de tu pantalla. Para que funcione correctamente:
 
-1. **Activar Subtítulos:** Presiona `Win + Ctrl + L`.
-2. **Posicionamiento:** Mueve la barra de subtítulos a la parte superior de la pantalla.
-3. **Calibración:** El script está configurado para leer la zona:
-   - X: 1230 a 2110
-   - Y: 14 a 80
-   (Asegúrate de que el texto de los subtítulos aparezca dentro de ese recuadro).
+   @echo off
 
-## 5. Ejecución del Copilot
-Cada vez que vayas a iniciar una reunión:
+   title Meet Copilot Pro Launcher
 
-1. **Abrir LM Studio:** Inicia el "Local Server" en el puerto 1234 si quieres resúmenes con IA.
-2. **Activar VENV:** `.\.venv\Scripts\activate`
-3. **Lanzar Script:** `python vision_copilot.py`
 
-## 6. Archivos de Salida
-El sistema genera automáticamente una carpeta llamada `meetings/` donde guarda:
-- **Transcripción:** Historial línea por línea en texto plano (`.txt`).
-- **Notas de IA:** Resúmenes técnicos estructurados en Markdown (`.md`).
 
-## 7. Comandos Útiles
-- **Detener el programa:** Presiona la tecla `q` sobre la ventana de "Vision Debug" o `Ctrl + C` en la terminal.
-- **Verificar captura:** La ventana "Vision Debug" te permite ver exactamente qué está leyendo la IA en tiempo real.
+   :: Ajusta la carpeta si clonaste el repo en otro lugar
+
+   cd /d "%USERPROFILE%\meet-copilot"
+
+
+
+   :: Activa el entorno y lanza la app
+
+   call .venv\Scripts\activate
+
+   cls
+
+   echo  ================================================
+
+   echo    MEET COPILOT PRO - ORQUESTADOR IA
+
+   echo  ================================================
+
+   echo.
+
+   python main_meeting_ai.py
+
+
+
+   echo.
+
+   echo El programa se ha cerrado.
+
+   pause
+
+
+
+3. Guardalo en tu Escritorio con el nombre Iniciar_Copilot.bat.
+
+4. Listo! Solo haz doble clic para iniciar la sesion.
+
