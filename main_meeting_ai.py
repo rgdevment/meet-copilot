@@ -8,7 +8,6 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, font
 import sys
 
-# Módulos propios
 import teams_stream_capture as tsc
 import realtime_translator as rt
 from openai import OpenAI
@@ -64,8 +63,10 @@ def process_smart_segment(client, full_payload):
     Eres un Tech Lead. Genera BITÁCORA TÉCNICA (Español).
     INPUT: Contexto + Segmento.
     INSTRUCCIONES:
-    1. Limpia OCR ("vakap"->"Backup", "Jaison"->"JSON").
+    1. Limpia OCR ("vakap"->"Backup", "Jaison"->"JSON", "zian"->"CIAM").
     2. Usa estilo directo y técnico.
+    3. Corrije, complementa y mejora la redacción, entiende el contexto y corrije las malas pronunciaciones del texto OCR.
+    4. Los temas son tecnicos, de ingenieria de software, developers, PO, PM, arquitectos, etc, se usan terminos especializados sobre agile, scrum, UAT, QA y de desarrollo de software, la mala camptura o pronunciacion suelen confundirlo, trata de razonar y entender el contexto.
 
     OUTPUT:
     [TEMA]
@@ -76,7 +77,7 @@ def process_smart_segment(client, full_payload):
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": full_payload}],
-            temperature=0.2,
+            temperature=0.3,
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -84,7 +85,7 @@ def process_smart_segment(client, full_payload):
 
 def generate_final_summary(client, full_minutes_text):
     gui_queue.put(("status", "🧠 Generando Resumen Final..."))
-    system_prompt = "Eres Arquitecto de Software. Genera REPORTE EJECUTIVO FINAL (Markdown)."
+    system_prompt = "Eres Arquitecto de Software. Genera REPORTE EJECUTIVO ENRIQUESIDO FINAL unificando todo los temas y contextualizando (Markdown)."
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
@@ -270,7 +271,6 @@ class MeetCopilotApp(tk.Tk):
         lbl.grid(row=row, column=0, sticky="ew", pady=(5, 0))
 
     def create_text_area(self, parent, text_color, row):
-        # AQUÍ ESTÁ EL ARREGLO: wrap=tk.WORD
         txt = scrolledtext.ScrolledText(
             parent,
             bg=COLORS["bg_panel"],
