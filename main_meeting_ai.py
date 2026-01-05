@@ -1,16 +1,14 @@
-import time
 import os
-import threading
 import queue
-from datetime import datetime
-from collections import deque
+import threading
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, font
-import sys
+from datetime import datetime
+from tkinter import messagebox, scrolledtext
 
-import teams_stream_capture as tsc
-import realtime_translator as rt
 from openai import OpenAI
+
+import realtime_translator as rt
+import teams_stream_capture as tsc
 
 # === CONFIGURACIÓN ===
 LM_STUDIO_URL = "http://localhost:1234/v1"
@@ -19,16 +17,17 @@ OUTPUT_DIR = "reuniones_logs"
 
 # === PALETA DE COLORES (VS CODE DARK THEME) ===
 COLORS = {
-    "bg_main":      "#1e1e1e", # Fondo principal
-    "bg_panel":     "#252526", # Fondo cajas texto
-    "fg_text":      "#d4d4d4", # Texto normal
-    "fg_accent":    "#007acc", # Azul VS Code
-    "fg_live":      "#4ec9b0", # Verde Cybertruck
-    "fg_trans":     "#ce9178", # Naranja suave
-    "fg_ai":        "#9cdcfe", # Azul claro
-    "fg_dim":       "#858585", # Gris logs
-    "border":       "#3e3e42"  # Bordes sutiles
+    "bg_main": "#1e1e1e",  # Fondo principal
+    "bg_panel": "#252526",  # Fondo cajas texto
+    "fg_text": "#d4d4d4",  # Texto normal
+    "fg_accent": "#007acc",  # Azul VS Code
+    "fg_live": "#4ec9b0",  # Verde Cybertruck
+    "fg_trans": "#ce9178",  # Naranja suave
+    "fg_ai": "#9cdcfe",  # Azul claro
+    "fg_dim": "#858585",  # Gris logs
+    "border": "#3e3e42",  # Bordes sutiles
 }
+
 
 # === ESTADO GLOBAL ===
 class AppState:
@@ -39,6 +38,7 @@ class AppState:
         self.is_shutting_down = False
         self.source_name = "Teams Capture"
 
+
 state = AppState()
 # Colas Thread-Safe
 gui_queue = queue.Queue()
@@ -47,9 +47,11 @@ text_process_queue = queue.Queue()
 ai_stop_event = threading.Event()
 capture_stop_event = threading.Event()
 
+
 # === HELPERS ===
 def get_llm_client():
     return OpenAI(base_url=LM_STUDIO_URL, api_key="lm-studio")
+
 
 def generate_filename(prefix):
     if not os.path.exists(OUTPUT_DIR):
@@ -57,44 +59,101 @@ def generate_filename(prefix):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
     return f"{OUTPUT_DIR}/{prefix}_{timestamp}.md"
 
+
 # === LÓGICA IA ===
 def process_smart_segment(client, full_payload):
     system_prompt = """
-    Eres un Tech Lead. Genera BITÁCORA TÉCNICA (Español).
-    INPUT: Contexto + Segmento.
+    # ROLE: Tech Lead & Senior Project Manager
+    # TAREA: Generar BITÁCORA TÉCNICA de un SEGMENTO ESPECÍFICO.
+
+    CONTEXTO OPERATIVO:
+    1. Recibirás un bloque de texto: las primeras 50 palabras son "CONTEXTO PREVIO" (referencia) y las siguientes 350 son el "SEGMENTO ACTUAL" a procesar.
+    2. INPUT: OCR/TRANSCRIPCIÓN HUMANA con errores fonéticos, ruidos y temas personales.
+    3. OBJETIVO: Minuta ÚNICAMENTE de las 350 palabras del segmento actual.
+
+    # DICCIONARIO DE REFERENCIA (Corrección de OCR):
+    - Metodología: "escrún/escaun" -> Scrum, "vackloc" -> Backlog, "deili" -> Daily, "gru-min" -> Grooming.
+    - DevOps: "paine/paylain" -> Pipeline, "dokér" -> Docker, "yámel" -> YAML, "de-ploi" -> Deploy.
+    - Desarrollo: "cuat" -> QA/UAT, "vug/back" -> Bug, "re-fact" -> Refactor, "api/eipi-ai" -> API, "jaison" -> JSON.
+    - Negocio: "estéicol" -> Stakeholder, "pi-o" -> PO, "peme" -> PM, "cián" -> CIAM, "vácap" -> Backup.
+
     INSTRUCCIONES:
-    1. Limpia OCR ("vakap"->"Backup", "Jaison"->"JSON", "zian"->"CIAM").
-    2. Usa estilo directo y técnico.
-    3. Corrije, complementa y mejora la redacción, entiende el contexto y corrije las malas pronunciaciones del texto OCR.
-    4. Los temas son tecnicos, de ingenieria de software, developers, PO, PM, arquitectos, etc, se usan terminos especializados sobre agile, scrum, UAT, QA y de desarrollo de software, la mala camptura o pronunciacion suelen confundirlo, trata de razonar y entender el contexto.
+    - DECODIFICACIÓN TÉCNICA: Usa el diccionario para reconstruir el sentido lógico.
+    - FILTRO DE RELEVANCIA: Ignora charla social irrelevante.
+    - ESTILO: Directo, técnico (Agile/Dev).
 
     OUTPUT:
-    [TEMA]
-    > Clave: ...
-    > Acuerdos: ...
+    [TEMA DOMINANTE DEL SEGMENTO]
+    > Clave: (Resumen técnico de estas 350 palabras).
+    > Acuerdos: (Decisiones, responsables o compromisos).
+    > Impedimentos/Riesgos: (Bloqueos detectados).
+    > Notas de Limpieza: (Términos corregidos en este bloque).
     """
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": full_payload}],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": full_payload},
+            ],
             temperature=0.3,
         )
         return response.choices[0].message.content
     except Exception as e:
         return f"Error IA: {str(e)}"
 
+
 def generate_final_summary(client, full_minutes_text):
     gui_queue.put(("status", "🧠 Generando Resumen Final..."))
-    system_prompt = "Eres Arquitecto de Software. Genera REPORTE EJECUTIVO ENRIQUESIDO FINAL unificando todo los temas y contextualizando (Markdown)."
+    system_prompt = """
+    # ROLE: Arquitecto de Software & Senior PMO.
+    # TAREA: Generar REPORTE EJECUTIVO ENRIQUECIDO FINAL unificando todas las bitácoras segmentadas.
+
+    CONTEXTO OPERATIVO:
+    1. Recibirás una serie de mini-minutas (bitácoras) generadas previamente.
+    2. Tu objetivo es conectar los puntos: identificar el hilo conductor, las decisiones de arquitectura y los compromisos de gestión.
+    3. IMPORTANTE: El input ya fue pre-procesado, pero si detectas inconsistencias técnicas entre bloques, usa tu criterio de Arquitecto para darles coherencia.
+
+    INSTRUCCIONES DE SÍNTESIS:
+    - UNIFICACIÓN: No repitas temas. Consolida la información dispersa en categorías lógicas (Arquitectura, Backend, Frontend, QA, Negocio).
+    - CONTEXTUALIZACIÓN: Traduce las discusiones técnicas en impactos para el proyecto (ej: "Se acordó usar JSON en lugar de XML para reducir latencia en la API").
+    - ENFOQUE AGILE: Estructura los acuerdos como entregables o definiciones para el Backlog.
+
+    FORMATO DE SALIDA (Markdown):
+
+    # 🏛️ REPORTE EJECUTIVO: [TÍTULO DE LA SESIÓN]
+
+    ## 🎯 Resumen de Alto Nivel
+    (Escribe un párrafo que explique el "Big Picture" de la reunión y los objetivos alcanzados).
+
+    ## 🛠️ Definiciones de Arquitectura y Desarrollo
+    - **Stack/Infraestructura:** (Decisiones sobre BD, Cloud, CI/CD, etc).
+    - **Lógica de Negocio/Funcional:** (Cambios en requerimientos o flujos de usuario).
+
+    ## 📋 Action Items & Governance (Tabla)
+    | Tarea / Acuerdo | Responsable | Prioridad | Estado/Ref |
+    | :--- | :--- | :--- | :--- |
+    | (Descripción clara) | (Persona/Rol) | (Alta/Media) | (UAT/Sprint X) |
+
+    ## ⚠️ Riesgos e Impedimentos (Critical Path)
+    - (Bloqueos técnicos o decisiones pendientes que detienen el avance).
+
+    ## ⏭️ Próximos Pasos
+    - (Lista accionable para la siguiente sesión).
+    """
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": full_minutes_text}],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": full_minutes_text},
+            ],
             temperature=0.4,
         )
         return response.choices[0].message.content
     except Exception as e:
         return f"Error Resumen: {str(e)}"
+
 
 # === WORKER IA ===
 def ai_worker(file_min, file_raw, translator):
@@ -113,10 +172,12 @@ def ai_worker(file_min, file_raw, translator):
         try:
             if state.is_shutting_down:
                 q_size = text_process_queue.qsize()
-                gui_queue.put(("status", f"🛑 Cierre: Procesando {q_size} bloques pendientes..."))
+                gui_queue.put(
+                    ("status", f"🛑 Cierre: Procesando {q_size} bloques pendientes...")
+                )
 
             payload_text = text_process_queue.get(timeout=0.5)
-            ts = datetime.now().strftime('%H:%M')
+            ts = datetime.now().strftime("%H:%M")
 
             if not state.is_shutting_down:
                 gui_queue.put(("status", f"⚡ Procesando bloque {ts}..."))
@@ -139,8 +200,13 @@ def ai_worker(file_min, file_raw, translator):
                 os.fsync(f.fileno())
 
             # GUI (LIFO)
-            clean_ui = minute_txt.replace("### ", "").replace("**", "").replace("labels:", "").strip()
-            gui_queue.put(("ai_new", f"⏱️ {ts}\n{clean_ui}\n{'-'*40}\n"))
+            clean_ui = (
+                minute_txt.replace("### ", "")
+                .replace("**", "")
+                .replace("labels:", "")
+                .strip()
+            )
+            gui_queue.put(("ai_new", f"⏱️ {ts}\n{clean_ui}\n{'-' * 40}\n"))
 
             text_process_queue.task_done()
 
@@ -154,9 +220,9 @@ def ai_worker(file_min, file_raw, translator):
         summary = generate_final_summary(client, "".join(all_minutes_text))
         gui_queue.put(("status", "💾 Guardando Resumen en Disco..."))
         with open(file_min, "a", encoding="utf-8") as f:
-            f.write("\n" + "="*40 + "\n")
+            f.write("\n" + "=" * 40 + "\n")
             f.write(summary)
-            f.write("\n" + "="*40 + "\n")
+            f.write("\n" + "=" * 40 + "\n")
             f.flush()
             os.fsync(f.fileno())
         gui_queue.put(("status", "✅ Reunión Finalizada y Guardada."))
@@ -164,6 +230,7 @@ def ai_worker(file_min, file_raw, translator):
         gui_queue.put(("status", "⚠️ Finalizado sin datos."))
 
     gui_queue.put(("shutdown_complete", True))
+
 
 # === WORKER CAPTURA ===
 def capture_worker(translator):
@@ -182,6 +249,7 @@ def capture_worker(translator):
     state.source_name = "Teams Capture"
     tsc.start_headless_capture(on_smart_block, on_live_feed, capture_stop_event)
 
+
 # === GUI CONFIG ===
 def ask_config_gui():
     config_win = tk.Tk()
@@ -190,11 +258,17 @@ def ask_config_gui():
     config_win.configure(bg=COLORS["bg_main"])
 
     # Centrar en pantalla
-    config_win.eval('tk::PlaceWindow . center')
+    config_win.eval("tk::PlaceWindow . center")
 
     selection = {"source": "es", "target": "en"}
 
-    tk.Label(config_win, text="Idioma de la Reunión:", bg=COLORS["bg_main"], fg="white", font=("Segoe UI", 11)).pack(pady=15)
+    tk.Label(
+        config_win,
+        text="Idioma de la Reunión:",
+        bg=COLORS["bg_main"],
+        fg="white",
+        font=("Segoe UI", 11),
+    ).pack(pady=15)
 
     def set_es():
         selection["source"], selection["target"] = "es", "en"
@@ -204,7 +278,15 @@ def ask_config_gui():
         selection["source"], selection["target"] = "en", "es"
         config_win.destroy()
 
-    btn_style = {"bg": COLORS["fg_accent"], "fg": "white", "font": ("Segoe UI", 10, "bold"), "bd": 0, "padx": 20, "pady": 5, "cursor": "hand2"}
+    btn_style = {
+        "bg": COLORS["fg_accent"],
+        "fg": "white",
+        "font": ("Segoe UI", 10, "bold"),
+        "bd": 0,
+        "padx": 20,
+        "pady": 5,
+        "cursor": "hand2",
+    }
 
     tk.Button(config_win, text="🇪🇸 ESPAÑOL", command=set_es, **btn_style).pack(pady=5)
     tk.Button(config_win, text="🇺🇸 INGLÉS", command=set_en, **btn_style).pack(pady=5)
@@ -224,9 +306,9 @@ class MeetCopilotApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # Configurar Grid
-        self.columnconfigure(0, weight=6) # 60%
-        self.columnconfigure(1, weight=4) # 40%
-        self.rowconfigure(1, weight=1)    # Alto dinámico
+        self.columnconfigure(0, weight=6)  # 60%
+        self.columnconfigure(1, weight=4)  # 40%
+        self.rowconfigure(1, weight=1)  # Alto dinámico
 
         # 1. HEADER
         self.header_var = tk.StringVar(value="Iniciando motores...")
@@ -234,7 +316,13 @@ class MeetCopilotApp(tk.Tk):
         header_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
         header_frame.pack_propagate(False)
 
-        lbl_header = tk.Label(header_frame, textvariable=self.header_var, bg=COLORS["fg_accent"], fg="white", font=("Segoe UI", 11, "bold"))
+        lbl_header = tk.Label(
+            header_frame,
+            textvariable=self.header_var,
+            bg=COLORS["fg_accent"],
+            fg="white",
+            font=("Segoe UI", 11, "bold"),
+        )
         lbl_header.pack(expand=True)
 
         # 2. COLUMNA IZQUIERDA
@@ -247,7 +335,9 @@ class MeetCopilotApp(tk.Tk):
         self.create_label(left_frame, "🔊 AUDIO EN VIVO", COLORS["fg_live"], 0)
         self.txt_live = self.create_text_area(left_frame, COLORS["fg_live"], 1)
 
-        self.create_label(left_frame, f"🌐 TRADUCCIÓN ({target_lang.upper()})", COLORS["fg_trans"], 2)
+        self.create_label(
+            left_frame, f"🌐 TRADUCCIÓN ({target_lang.upper()})", COLORS["fg_trans"], 2
+        )
         self.txt_trans = self.create_text_area(left_frame, COLORS["fg_trans"], 3)
 
         # 3. COLUMNA DERECHA
@@ -261,13 +351,28 @@ class MeetCopilotApp(tk.Tk):
 
         # 4. FOOTER
         self.log_var = tk.StringVar(value="Esperando eventos...")
-        lbl_log = tk.Label(self, textvariable=self.log_var, bg="#333333", fg="#aaaaaa", font=("Consolas", 9), anchor="w", padx=10)
+        lbl_log = tk.Label(
+            self,
+            textvariable=self.log_var,
+            bg="#333333",
+            fg="#aaaaaa",
+            font=("Consolas", 9),
+            anchor="w",
+            padx=10,
+        )
         lbl_log.grid(row=2, column=0, columnspan=2, sticky="ew")
 
         self.check_queue()
 
     def create_label(self, parent, text, color, row):
-        lbl = tk.Label(parent, text=text, bg=COLORS["bg_main"], fg=color, font=("Segoe UI", 10, "bold"), anchor="w")
+        lbl = tk.Label(
+            parent,
+            text=text,
+            bg=COLORS["bg_main"],
+            fg=color,
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+        )
         lbl.grid(row=row, column=0, sticky="ew", pady=(5, 0))
 
     def create_text_area(self, parent, text_color, row):
@@ -281,7 +386,7 @@ class MeetCopilotApp(tk.Tk):
             wrap=tk.WORD,
             highlightthickness=1,
             highlightbackground=COLORS["border"],
-            highlightcolor=COLORS["fg_accent"]
+            highlightcolor=COLORS["fg_accent"],
         )
         txt.grid(row=row, column=0, sticky="nsew", pady=(2, 5))
         return txt
@@ -317,16 +422,21 @@ class MeetCopilotApp(tk.Tk):
         self.after(delay, self.check_queue)
 
     def on_close(self):
-        if state.is_shutting_down: return
+        if state.is_shutting_down:
+            return
 
-        if messagebox.askokcancel("Finalizar Reunión", "¿Desea detener la captura y generar el resumen final?"):
+        if messagebox.askokcancel(
+            "Finalizar Reunión", "¿Desea detener la captura y generar el resumen final?"
+        ):
             state.is_shutting_down = True
             self.header_var.set("🛑 DETENIENDO... (VACIANDO MEMORIA)")
             threading.Thread(target=perform_shutdown_sequence).start()
 
+
 def perform_shutdown_sequence():
     capture_stop_event.set()
     ai_stop_event.set()
+
 
 # === MAIN ENTRY POINT ===
 def main():
@@ -339,7 +449,9 @@ def main():
     file_raw = generate_filename("RAW")
     file_min = generate_filename("MINUTA")
 
-    t_ai = threading.Thread(target=ai_worker, args=(file_min, file_raw, translator), daemon=True)
+    t_ai = threading.Thread(
+        target=ai_worker, args=(file_min, file_raw, translator), daemon=True
+    )
     t_capture = threading.Thread(target=capture_worker, args=(translator,), daemon=True)
 
     t_ai.start()
@@ -347,6 +459,7 @@ def main():
 
     app = MeetCopilotApp(s_lang, t_lang)
     app.mainloop()
+
 
 if __name__ == "__main__":
     main()
