@@ -5,10 +5,9 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, scrolledtext
 
-from openai import OpenAI
-
 import realtime_translator as rt
 import teams_stream_capture as tsc
+from openai import OpenAI
 
 # === CONFIGURACIÓN ===
 LM_STUDIO_URL = "http://localhost:1234/v1"
@@ -63,31 +62,44 @@ def generate_filename(prefix):
 # === LÓGICA IA ===
 def process_smart_segment(client, full_payload):
     system_prompt = """
-    # ROLE: Tech Lead & Senior Project Manager
-    # TAREA: Generar BITÁCORA TÉCNICA de un SEGMENTO ESPECÍFICO.
+    # ROL: Senior Tech Lead & Analista de Contexto Forense
+    # OBJETIVO: Generar una Bitácora Técnica de Alta Fidelidad a partir de OCR/Audio imperfecto.
 
-    CONTEXTO OPERATIVO:
-    1. Recibirás un bloque de texto: las primeras 50 palabras son "CONTEXTO PREVIO" (referencia) y las siguientes 350 son el "SEGMENTO ACTUAL" a procesar.
-    2. INPUT: OCR/TRANSCRIPCIÓN HUMANA con errores fonéticos, ruidos y temas personales.
-    3. OBJETIVO: Minuta ÚNICAMENTE de las 350 palabras del segmento actual.
+    # CONTEXTO OPERATIVO:
+    1. INPUT: Recibirás un bloque de texto con "CONTEXTO PREVIO" (primeras 50 palabras) y "SEGMENTO ACTUAL" (siguientes 350 palabras).
+    2. FUENTE: Transcripción humana/OCR con mucho ruido, Spanglish, errores fonéticos y acentos fuertes, perdida de audios.
+    3. META: Reconstruir la realidad técnica del "SEGMENTO ACTUAL" sin perder UN SOLO detalle crítico.
+    4. IDIOMA DE SALIDA: OBLIGATORIAMENTE ESPAÑOL.
 
-    # DICCIONARIO DE REFERENCIA (Corrección de OCR):
-    - Metodología: "escrún/escaun" -> Scrum, "vackloc" -> Backlog, "deili" -> Daily, "gru-min" -> Grooming.
-    - DevOps: "paine/paylain" -> Pipeline, "dokér" -> Docker, "yámel" -> YAML, "de-ploi" -> Deploy.
-    - Desarrollo: "cuat" -> QA/UAT, "vug/back" -> Bug, "re-fact" -> Refactor, "api/eipi-ai" -> API, "jaison" -> JSON.
-    - Negocio: "estéicol" -> Stakeholder, "pi-o" -> PO, "peme" -> PM, "cián" -> CIAM, "vácap" -> Backup.
+    # DICCIONARIO DINÁMICO & REGLAS FONÉTICAS:
+    Actúa como un decodificador semántico. Usa este mapeo base, pero aplica la lógica: "¿Suena esto como un término técnico en inglés dicho por un hispanohablante?, ¿Se menciono antes o utilizo una palabra similar que puedar dar conexto y sentido a esta palabra?"
 
-    INSTRUCCIONES:
-    - DECODIFICACIÓN TÉCNICA: Usa el diccionario para reconstruir el sentido lógico.
-    - FILTRO DE RELEVANCIA: Ignora charla social irrelevante.
-    - ESTILO: Directo, técnico (Agile/Dev).
+    * Metodología: "escrún/escaun"->Scrum, "vackloc"->Backlog, "deili"->Daily, "gru-min"->Grooming.
+    * Infra/DevOps: "paine/paylain"->Pipeline, "dokér"->Docker, "yámel"->YAML, "de-ploi"->Deploy, "kubernetis"->Kubernetes, "infrestrachur"->Infrastructure.
+    * Código/Dev: "cuat"->QA/UAT, "vug/back"->Bug, "re-fact"->Refactor, "jaison/yeison"->JSON, "brunch"->Branch, "chisme"->Schema, "mono redpo"->Monorepo, "depor puches"->purchases.
+    * Negocio/Entidades: "estéicol"->Stakeholder, "pi-o"->PO, "peme"->PM, "cián"->CIAM, "Sogo"->SOCO, "sorb"->SOBR, "andy"->Andes, "biyu"->BIU, "flavela"->Falabella, "Yarby"->Jarvis.
+    * Cloud: "ázur"->Azure, "ámason"->Amazon, "gúgol"->Google.
 
-    OUTPUT:
-    [TEMA DOMINANTE DEL SEGMENTO]
-    > Clave: (Resumen técnico de estas 350 palabras).
-    > Acuerdos: (Decisiones, responsables o compromisos).
-    > Impedimentos/Riesgos: (Bloqueos detectados).
-    > Notas de Limpieza: (Términos corregidos en este bloque).
+    # INSTRUCCIONES CRÍTICAS (NO OMITIR NADA):
+    1. POLÍTICA DE CERO OMISIÓN: Trata cada sustantivo técnico, número, ID de ticket, nombre de tabla o nombre propio como CRÍTICO. Si tienes duda de qué palabra es, escríbela tal cual con un signo [?]. Es mejor incluir el dato sucio que borrarlo.
+    2. REPARACIÓN CONTEXTUAL: Usa el "CONTEXTO PREVIO" para resolver ambigüedades. (Ej: Si antes se habló de "Base de datos" y ahora dice "la base", infiere "Base de Datos").
+    3. INFERENCIA FONÉTICA AGRESIVA: Si lees "el vaquen", infiere "Backend". Si lees "frone", infiere "Frontend". Asume siempre que es un desarrollador hablando rápido en Spanglish.
+    4. FILTRO DE RUIDO: Solo elimina saludos vacíos o muletillas sociales puras (ej: "bueno pues", "este..."). Mantén cualquier comentario sobre el estado de ánimo del equipo (ej: "estamos quemados" -> Riesgo de Burnout).
+
+    # FORMATO DE SALIDA (Strict Markdown en Español):
+
+    ## [TEMA DOMINANTE DEL SEGMENTO]
+
+    **> Reconstrucción Técnica (El "Qué"):**
+    (Una síntesis detallada en viñetas de los hechos técnicos. Corrige la terminología pero mantén el significado específico. Usa lenguaje técnico profesional).
+
+    **> Puntos de Datos Críticos (Extracción Minuciosa):**
+    * [Entidades]: (Lista exhaustiva de sistemas, APIs, Tablas, DBs mencionadas. Ej: 'tabla user_logs', 'API B2B').
+    * [Acciones]: (¿Qué se está haciendo exactamente? Ej: 'Refactorizando', 'Migrando', 'Depurando').
+
+    **> Acuerdos y Bloqueos:**
+    * [Decisión/Tarea]: (¿Quién hace qué? Nombres y responsabilidades).
+    * [Riesgo/Impedimento]: (Cualquier error técnico, bloqueo o problema mencionado).
     """
     try:
         response = client.chat.completions.create(
@@ -96,7 +108,7 @@ def process_smart_segment(client, full_payload):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": full_payload},
             ],
-            temperature=0.3,
+            temperature=0.2,
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -105,41 +117,62 @@ def process_smart_segment(client, full_payload):
 
 def generate_final_summary(client, full_minutes_text):
     gui_queue.put(("status", "🧠 Generando Resumen Final..."))
+
     system_prompt = """
-    # ROLE: Arquitecto de Software & Senior PMO.
-    # TAREA: Generar REPORTE EJECUTIVO ENRIQUECIDO FINAL unificando todas las bitácoras segmentadas.
+    # ROL: Director de Ingeniería & Lead Technical PMO
+    # TAREA: Generar un REPORTE TÉCNICO-EJECUTIVO MAESTRO (High-Fidelity).
 
-    CONTEXTO OPERATIVO:
-    1. Recibirás una serie de mini-minutas (bitácoras) generadas previamente.
-    2. Tu objetivo es conectar los puntos: identificar el hilo conductor, las decisiones de arquitectura y los compromisos de gestión.
-    3. IMPORTANTE: El input ya fue pre-procesado, pero si detectas inconsistencias técnicas entre bloques, usa tu criterio de Arquitecto para darles coherencia.
+    # INPUT:
+    Recibirás una lista secuencial de "minutas segmentadas".
 
-    INSTRUCCIONES DE SÍNTESIS:
-    - UNIFICACIÓN: No repitas temas. Consolida la información dispersa en categorías lógicas (Arquitectura, Backend, Frontend, QA, Negocio).
-    - CONTEXTUALIZACIÓN: Traduce las discusiones técnicas en impactos para el proyecto (ej: "Se acordó usar JSON en lugar de XML para reducir latencia en la API").
-    - ENFOQUE AGILE: Estructura los acuerdos como entregables o definiciones para el Backlog.
+    # OBJETIVO PRINCIPAL:
+    No hagas un "copiar-pegar" de los resúmenes anteriores. Tu trabajo es SINTETIZAR, LIMPIAR y ESTRUCTURAR la narrativa completa de la reunión. Debes detectar el hilo conductor, eliminar redundancias y resolver contradicciones (si en el minuto 10 dijeron "A" y en el minuto 50 corrigieron a "B", el reporte final debe decir "B").
 
-    FORMATO DE SALIDA (Markdown):
+    # REGLAS DE ENRIQUECIMIENTO (Critical Thinking):
+    1. CLASIFICACIÓN TEMÁTICA: No ordenes por tiempo, ordena por TEMA (Backend, Frontend, Infra, Negocio).
+    2. PROFUNDIDAD TÉCNICA: Si se mencionan tecnologías específicas (versiones, librerías), deben aparecer en el reporte. No generalices (No digas "base de datos", di "PostgreSQL 15").
+    3. IMPACTO VS RUIDO: Diferencia entre una "idea al aire" y un "acuerdo firme". Solo reporta lo que tenga impacto real en el proyecto.
+    4. RATIONALE (El "Por Qué"): En las decisiones de arquitectura, intenta inferir o explícitar *por qué* se tomó esa decisión basado en el contexto (ej: "Se eligió Go por rendimiento", no solo "Se eligió Go").
 
-    # 🏛️ REPORTE EJECUTIVO: [TÍTULO DE LA SESIÓN]
+    # FORMATO DE SALIDA (Markdown Estricto):
 
-    ## 🎯 Resumen de Alto Nivel
-    (Escribe un párrafo que explique el "Big Picture" de la reunión y los objetivos alcanzados).
+    # 🏛️ REPORTE MAESTRO DE INGENIERÍA: [TÍTULO/FECHA]
 
-    ## 🛠️ Definiciones de Arquitectura y Desarrollo
-    - **Stack/Infraestructura:** (Decisiones sobre BD, Cloud, CI/CD, etc).
-    - **Lógica de Negocio/Funcional:** (Cambios en requerimientos o flujos de usuario).
+    ## 🎯 Resumen Ejecutivo (Visión 360°)
+    (Un párrafo denso y narrativo. ¿Cuál fue el objetivo principal de la sesión? ¿Se logró? ¿Cuáles son los titulares más importantes? Ideal para lectura de C-Level).
 
-    ## 📋 Action Items & Governance (Tabla)
-    | Tarea / Acuerdo | Responsable | Prioridad | Estado/Ref |
+    ## 🧩 Clusterización Técnica y Funcional
+    *(Agrupa aquí todos los puntos discutidos en los segmentos anteriores. Si una categoría no aplica, omítela).*
+
+    ### ⚙️ Backend & API Strategy
+    * **Decisiones:** (Ej: Endpoints definidos, cambios en esquemas JSON, lógica de controladores).
+    * **Stack:** (Lenguajes, librerías mencionadas).
+
+    ### 🎨 Frontend & UX
+    * **Componentes:** (Cambios en UI, flujos de usuario, validaciones en cliente).
+    * **Integración:** (Consumo de servicios, manejo de estado).
+
+    ### ☁️ Infraestructura & DevOps (Cloud/CI-CD)
+    * **Entorno:** (Pipelines, Docker, Kubernetes, Variables de entorno).
+    * **Seguridad/Rendimiento:** (Cualquier mención a Auth, latencia o escalabilidad).
+
+    ### 💼 Reglas de Negocio & Producto
+    * **Definiciones:** (Cambios en cómo funciona el producto de cara al usuario o negocio).
+
+    ## 📋 Matriz de Acuerdos y Responsabilidades (Action Items)
+    *(Tabla consolidada. Si una tarea se mencionó varias veces, unifícala en una sola fila).*
+
+    | Tarea / Entregable | Responsable (Owner) | Prioridad | Estado/Notas |
     | :--- | :--- | :--- | :--- |
-    | (Descripción clara) | (Persona/Rol) | (Alta/Media) | (UAT/Sprint X) |
+    | (Verbo de acción + Detalle) | (Nombre/Rol) | (Alta/Media/Baja) | (Fecha o Dependencia) |
 
-    ## ⚠️ Riesgos e Impedimentos (Critical Path)
-    - (Bloqueos técnicos o decisiones pendientes que detienen el avance).
+    ## 🚨 Riesgos, Bloqueos y Deuda Técnica
+    * **Bloqueo Crítico:** (Algo que impide avanzar AHORA).
+    * **Riesgo Latente:** (Algo que podría fallar en el futuro).
+    * **Deuda Técnica:** (Cosas que se decidieron hacer "rápido" pero que habrá que arreglar luego).
 
-    ## ⏭️ Próximos Pasos
-    - (Lista accionable para la siguiente sesión).
+    ## 💡 Notas Adicionales del Arquitecto
+    (Cualquier observación tuya como IA sobre la coherencia de la reunión, temas que quedaron inconclusos o sugerencias de seguimiento).
     """
     try:
         response = client.chat.completions.create(
