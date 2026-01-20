@@ -39,3 +39,5 @@ meetings/
 Thumbs.db
 reuniones_logs/
 !reuniones_logs/.gitkeep
+
+@AutomationLog.txt

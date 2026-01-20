@@ -140,8 +140,8 @@ def rename_meeting_files(old_raw, old_min, new_name):
             return old_raw, old_min
         timestamp = match.group(1)
 
-        new_raw = f"{OUTPUT_DIR}/RAW_{timestamp}_{safe_name}.txt"
-        new_min = f"{OUTPUT_DIR}/MINUTA_{timestamp}_{safe_name}.md"
+        new_raw = f"{OUTPUT_DIR}/{safe_name}-{timestamp}.txt"
+        new_min = f"{OUTPUT_DIR}/{safe_name}-{timestamp}.md"
 
         # Solo renombrar si los archivos existen y el nuevo nombre es diferente
         if os.path.exists(old_raw) and old_raw != new_raw:
