@@ -172,7 +172,7 @@ def process_smart_segment(client, full_payload):
     * Metodología: "escrún/escaun"->Scrum, "vackloc"->Backlog, "deili"->Daily, "gru-min"->Grooming.
     * Infra/DevOps: "paine/paylain"->Pipeline, "dokér"->Docker, "yámel"->YAML, "de-ploi"->Deploy, "kubernetis"->Kubernetes, "infrestrachur"->Infrastructure.
     * Código/Dev: "cuat"->QA/UAT, "vug/back"->Bug, "re-fact"->Refactor, "jaison/yeison"->JSON, "brunch"->Branch, "chisme"->Schema, "mono redpo"->Monorepo, "depor puches"->purchases.
-    * Negocio/Entidades: "estéicol"->Stakeholder, "pi-o"->PO, "peme"->PM, "cián"->CIAM, "Sogo"->SOCO, "sorb"->SOBR, "andy"->Andes, "biyu"->BIU, "flavela"->Falabella, "Yarby"->Jarvis.
+    * Negocio/Entidades: "estéicol"->Stakeholder, "pi-o"->PO, "peme"->PM, "cián"->CIAM, "Sogo"->SOCO, "sorb"->SOBR, "andy"->Andes, "biyu"->BIU, "flavela"->Falabella, "Yarby"->Jarvis, "TP"->OTP.
     * Cloud: "ázur"->Azure, "ámason"->Amazon, "gúgol"->Google.
 
     # INSTRUCCIONES CRÍTICAS (NO OMITIR NADA):
@@ -394,13 +394,16 @@ def capture_worker(translator):
         text_process_queue.put(payload)
 
     def on_live_feed(text_buffer):
+        # 1. Update live Spanish text immediately
         gui_queue.put(("live", text_buffer))
-        try:
-            if len(text_buffer) > 2:
-                trans = translator.translate_text(text_buffer[-600:])
-                gui_queue.put(("trans", trans))
-        except:
-            pass
+
+        # 2. Non-blocking call: Just push to translator worker
+        if len(text_buffer) > 2:
+            # We send the callback to put the result into the gui_queue
+            translator.translate_live_view(
+                text_buffer[-600:],
+                lambda trans: gui_queue.put(("trans", trans))
+            )
 
     state.source_name = "Teams Capture"
     tsc.start_headless_capture(on_smart_block, on_live_feed, capture_stop_event)
