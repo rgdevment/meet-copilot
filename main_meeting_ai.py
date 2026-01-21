@@ -286,10 +286,14 @@ def perform_shutdown_sequence():
     ai_stop_event.set()
 
 
+# main_meeting_ai.py (Ajuste en la inicialización)
+
 def main():
+    """Punto de entrada principal actualizado para la nueva GUI"""
     s_lang, t_lang = ask_config_gui()
     state.source_lang, state.target_lang = s_lang, t_lang
 
+    # 1. Creamos el traductor primero
     translator = rt.RealTimeTranslator(state.source_lang, state.target_lang)
 
     initial_meeting_name = None
@@ -303,13 +307,21 @@ def main():
     file_raw = generate_filename("RAW", "txt", initial_meeting_name)
     file_min = generate_filename("MINUTA", "md", initial_meeting_name)
 
-    # Start independent worker threads
+    # 2. Iniciamos los hilos (workers)
     threading.Thread(
         target=ai_worker, args=(file_min, file_raw, initial_meeting_name), daemon=True
     ).start()
     threading.Thread(target=capture_worker, args=(translator,), daemon=True).start()
 
-    app = MeetCopilotApp(s_lang, t_lang, gui_queue, state, perform_shutdown_sequence)
+    # 3. PASAR EL TRANSLATOR A LA APP (Cambio crítico aquí)
+    app = MeetCopilotApp(
+        s_lang,
+        t_lang,
+        gui_queue,
+        state,
+        translator, # <-- Añadimos esto para el botón de cambio de idioma
+        perform_shutdown_sequence
+    )
     app.mainloop()
 
 
