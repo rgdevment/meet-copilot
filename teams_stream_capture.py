@@ -15,6 +15,8 @@ SILENCE_TIMEOUT = 20
 MIN_WORDS_FOR_TIMEOUT = 50
 CONTEXT_OVERLAP = 150
 
+# Speakers to ignore to maintain log fidelity
+EXCLUDED_SPEAKERS = ["Usuario desconocido", "Unknown User"]
 
 class TeamsRecorderSmart:
     def __init__(self):
@@ -104,10 +106,15 @@ class TeamsRecorderSmart:
 
     def update(self):
         speaker, raw_text = self._get_caption()
-        if not raw_text:
+        if not raw_text or speaker in EXCLUDED_SPEAKERS:
             return False
 
         clean_text = re.sub(r"\s+", " ", raw_text).strip()
+
+        # Ignore very short OCR fragments to wait for stabilization
+        if len(clean_text) < 4:
+            return False
+
         full_line = f"[{speaker}]: {clean_text}"
 
         if full_line == self.last_raw:
@@ -116,26 +123,22 @@ class TeamsRecorderSmart:
         self.last_raw = full_line
         self.last_activity_time = time.time()
 
-        # IMPROVED: Deduplication logic with look-back
-        # Search for the same speaker in the last 5 buffer lines to handle OCR reconstructions
+        # Look-back deduplication to handle interleaved speakers
         lookback_limit = min(5, len(self.buffer_lines))
-        for i in range(
-            len(self.buffer_lines) - 1, len(self.buffer_lines) - 1 - lookback_limit, -1
-        ):
+        for i in range(len(self.buffer_lines) - 1, len(self.buffer_lines) - 1 - lookback_limit, -1):
             last_saved = self.buffer_lines[i]
             if f"[{speaker}]" in last_saved:
-                last_content = (
-                    last_saved.split("]: ", 1)[1] if "]: " in last_saved else ""
-                )
+                last_content = last_saved.split("]: ", 1)[1] if "]: " in last_saved else ""
 
-                # If new text is a superset or similar to the old one, replace it
-                if last_content in clean_text or self._is_similar(
-                    last_content, clean_text
-                ):
+                # Case A: New text is already part of what we saved (Ignore)
+                if clean_text in last_content:
+                    return False
+
+                # Case B: Saved text is part of the new reconstruction (Replace)
+                if last_content in clean_text or self._is_similar(last_content, clean_text):
                     self.buffer_lines.pop(i)
                     self.buffer_lines.append(full_line)
                     return True
-                # Break if we find the speaker but it's a different context
                 break
 
         self.buffer_lines.append(full_line)
@@ -181,7 +184,6 @@ class TeamsRecorderSmart:
     def flush(self):
         return self.check_snapshot(force_flush=True)
 
-
 def get_meeting_name():
     try:
         with auto.UIAutomationInitializerInThread():
@@ -200,7 +202,6 @@ def get_meeting_name():
     except Exception:
         pass
     return None
-
 
 def start_headless_capture(
     on_block_complete_callback, on_live_update_callback, stop_event
