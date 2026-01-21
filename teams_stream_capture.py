@@ -1,15 +1,19 @@
+import json
+import os
+import queue
 import re
+import threading
 import time
 from collections import deque
 from difflib import SequenceMatcher
 
 import uiautomation as auto
 
-# === CONFIGURACIÓN ===
-WORD_THRESHOLD = 350  # Palabras para enviar bloque completo
-SILENCE_TIMEOUT = 20  # Segundos de silencio para enviar bloque parcial
-MIN_WORDS_FOR_TIMEOUT = 50  # Mínimo de palabras para activar timeout
-CONTEXT_OVERLAP = 50  # Palabras de contexto previo para la IA
+# === CONFIGURATION ===
+WORD_THRESHOLD = 350
+SILENCE_TIMEOUT = 20
+MIN_WORDS_FOR_TIMEOUT = 50
+CONTEXT_OVERLAP = 150
 
 
 class TeamsRecorderSmart:
@@ -21,10 +25,30 @@ class TeamsRecorderSmart:
         self.snapshots = deque(maxlen=50)
         self.window_name = "Buscando Teams..."
         self.last_raw = ""
+        self.glossary_data = self._load_glossary()
+        self.compiled_glossary = self._compile_glossary()
+
+    def _load_glossary(self):
+        path = os.path.join(os.path.dirname(__file__), "technical_glossary.json")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return {}
+
+    def _compile_glossary(self):
+        compiled = []
+        for wrong, right in self.glossary_data.items():
+            pattern = re.compile(rf"\b{re.escape(wrong)}\b", re.IGNORECASE)
+            compiled.append((pattern, right))
+        return compiled
+
+    def _apply_fixes(self, text):
+        for pattern, right in self.compiled_glossary:
+            text = pattern.sub(right, text)
+        return text
 
     def _get_caption(self):
         try:
-            # Busca ventanas de Teams de forma segura
             roots = auto.WindowControl(
                 searchDepth=1, ClassName="TeamsWebView"
             ).GetChildren()
@@ -48,7 +72,6 @@ class TeamsRecorderSmart:
                     continue
 
                 candidates = []
-                # Escaneo profundo buscando subtítulos
                 for control, depth in auto.WalkControl(web_area, maxDepth=14):
                     try:
                         if control.ControlTypeName == "GroupControl":
@@ -61,7 +84,6 @@ class TeamsRecorderSmart:
                                     and node_text.ControlTypeName == "TextControl"
                                 ):
                                     txt = node_text.Name
-                                    # Filtros básicos de ruido
                                     if txt and len(txt) > 1 and "Micrófono" not in txt:
                                         candidates.append((node_name.Name, txt))
                     except Exception:
@@ -94,21 +116,27 @@ class TeamsRecorderSmart:
         self.last_raw = full_line
         self.last_activity_time = time.time()
 
-        # Lógica de Deduplicación
-        if self.buffer_lines:
-            last_saved = self.buffer_lines[-1]
+        # IMPROVED: Deduplication logic with look-back
+        # Search for the same speaker in the last 5 buffer lines to handle OCR reconstructions
+        lookback_limit = min(5, len(self.buffer_lines))
+        for i in range(
+            len(self.buffer_lines) - 1, len(self.buffer_lines) - 1 - lookback_limit, -1
+        ):
+            last_saved = self.buffer_lines[i]
             if f"[{speaker}]" in last_saved:
                 last_content = (
                     last_saved.split("]: ", 1)[1] if "]: " in last_saved else ""
                 )
-                if last_content in clean_text:
-                    self.buffer_lines.pop()
+
+                # If new text is a superset or similar to the old one, replace it
+                if last_content in clean_text or self._is_similar(
+                    last_content, clean_text
+                ):
+                    self.buffer_lines.pop(i)
                     self.buffer_lines.append(full_line)
                     return True
-                if self._is_similar(last_content, clean_text):
-                    self.buffer_lines.pop()
-                    self.buffer_lines.append(full_line)
-                    return True
+                # Break if we find the speaker but it's a different context
+                break
 
         self.buffer_lines.append(full_line)
         return True
@@ -131,37 +159,30 @@ class TeamsRecorderSmart:
         timestamp = time.strftime("%H:%M")
         raw_content = "\n".join(self.buffer_lines)
 
-        # Calcular Overlap para el siguiente bloque
         words = raw_content.split()
         tail_words = words[-CONTEXT_OVERLAP:] if len(words) > CONTEXT_OVERLAP else words
         new_overlap = " ".join(tail_words)
 
-        # Construir Payload para IA
-        final_payload = ""
+        final_payload = f"=== REUNIÓN: {self.window_name} ===\n"
         if self.previous_context:
-            final_payload += (
-                f"--- CONTEXTO PREVIO (Overlap) ---\n...{self.previous_context}\n"
-            )
+            final_payload += f"--- CONTEXTO PREVIO ---\n...{self.previous_context}\n"
 
         final_payload += f"--- SEGMENTO ACTUAL ({count} palabras) ---\n{raw_content}"
 
-        # Guardar snapshot interno
         header = f"--- BLOQUE {timestamp} (Words: {count}) ---"
         self.snapshots.append(f"{header}\n{final_payload}")
 
-        # Resetear estado
         self.previous_context = new_overlap
         self.buffer_lines = []
         self.start_time = time.time()
 
-        return final_payload
+        return self._apply_fixes(final_payload)
 
     def flush(self):
         return self.check_snapshot(force_flush=True)
 
 
 def get_meeting_name():
-    """Obtiene el nombre de la reunión desde la ventana de Teams."""
     try:
         with auto.UIAutomationInitializerInThread():
             roots = auto.WindowControl(
@@ -181,35 +202,40 @@ def get_meeting_name():
     return None
 
 
-# === ENTRY POINT DEL HILO ===
 def start_headless_capture(
     on_block_complete_callback, on_live_update_callback, stop_event
 ):
+    block_queue = queue.Queue()
+
+    def worker():
+        while not stop_event.is_set() or not block_queue.empty():
+            try:
+                payload = block_queue.get(timeout=1)
+                on_block_complete_callback(payload)
+                block_queue.task_done()
+            except queue.Empty:
+                continue
+
+    dispatch_thread = threading.Thread(target=worker, daemon=True)
+    dispatch_thread.start()
+
     with auto.UIAutomationInitializerInThread():
         recorder = TeamsRecorderSmart()
 
         try:
             while not stop_event.is_set():
-                recorder.update()
+                if recorder.update():
+                    if on_live_update_callback:
+                        current_buffer = "\n".join(recorder.buffer_lines[-8:])
+                        on_live_update_callback(recorder._apply_fixes(current_buffer))
 
-                # 1. LIVE UPDATE (Solo si hay cambio visual)
-                if on_live_update_callback:
-                    # Enviamos solo las ultimas lineas para visualizar
-                    current_buffer = "\n".join(recorder.buffer_lines[-8:])
-                    on_live_update_callback(current_buffer)
-
-                # 2. CHECK BLOCK (IA)
                 payload = recorder.check_snapshot()
                 if payload:
-                    on_block_complete_callback(payload)
+                    block_queue.put(payload)
 
                 time.sleep(0.1)
-
-        except Exception:
-            pass
-
         finally:
-            # FLUSH FINAL
             final_payload = recorder.flush()
             if final_payload:
-                on_block_complete_callback(final_payload)
+                block_queue.put(final_payload)
+            dispatch_thread.join(timeout=2)
