@@ -3,6 +3,7 @@ import queue
 import re
 import sys
 import threading
+import time
 from datetime import datetime
 
 from openai import OpenAI
@@ -12,15 +13,18 @@ import realtime_translator as rt
 import teams_stream_capture as tsc
 from gui_module import MeetCopilotApp, ask_config_gui
 
+# === CONFIGURATION ===
 LM_STUDIO_URL = "http://localhost:1234/v1"
 MODEL_NAME = "local-model"
 OUTPUT_DIR = "reuniones_logs"
 
+MAX_RETRIES = 3  # Number of attempts before giving up
+RETRY_DELAY = 5  # Seconds to wait between attempts
+
 
 class AppState:
-    """Estado global de la aplicación"""
     def __init__(self):
-        self.status = "Esperando configuración..."
+        self.status = "Waiting for configuration..."
         self.source_lang = "es"
         self.target_lang = "en"
         self.is_shutting_down = False
@@ -40,7 +44,6 @@ def get_llm_client():
 
 
 def sanitize_filename(name):
-    """Limpia un string para usarlo como nombre de archivo"""
     invalid_chars = '<>:"/\\|?*'
     for char in invalid_chars:
         name = name.replace(char, "")
@@ -58,7 +61,6 @@ def extract_meeting_name_from_window(window_title):
         r"^Meeting in\s*",
         r"^Reunión en\s*",
     ]
-
     name = window_title
     for pattern in patterns_to_remove:
         name = re.sub(pattern, "", name, flags=re.IGNORECASE)
@@ -69,7 +71,6 @@ def generate_filename(prefix, extension="md", meeting_name=None):
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-
     if meeting_name:
         safe_name = sanitize_filename(meeting_name)
         return f"{OUTPUT_DIR}/{safe_name}-{timestamp}.{extension}"
@@ -77,35 +78,39 @@ def generate_filename(prefix, extension="md", meeting_name=None):
 
 
 def suggest_meeting_name_with_ai(client, summary_text):
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "system",
-                    "content": prompts.MEETING_NAME_SYSTEM_PROMPT,
-                },
-                {"role": "user", "content": prompts.MEETING_NAME_USER_PROMPT + summary_text[:2000]},
-            ],
-            temperature=0.2,
-            max_tokens=30,
-        )
-        suggested = response.choices[0].message.content.strip()
-        suggested = suggested.strip("\"'")
-        return suggested if suggested else None
-    except Exception:
-        return None
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": prompts.MEETING_NAME_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": prompts.MEETING_NAME_USER_PROMPT
+                        + summary_text[:2000],
+                    },
+                ],
+                temperature=0.2,
+                max_tokens=30,
+                timeout=20,
+            )
+            suggested = response.choices[0].message.content.strip()
+            return suggested.strip("\"'") if suggested else None
+        except Exception:
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(2)
+                continue
+            return None
 
 
 def rename_meeting_files(old_raw, old_min, new_name):
     try:
         safe_name = sanitize_filename(new_name)
-
         match = re.search(r"(\d{4}-\d{2}-\d{2}_\d{2}-\d{2})", old_raw)
         if not match:
             return old_raw, old_min
-        timestamp = match.group(1)
 
+        timestamp = match.group(1)
         new_raw = f"{OUTPUT_DIR}/{safe_name}-{timestamp}.txt"
         new_min = f"{OUTPUT_DIR}/{safe_name}-{timestamp}.md"
 
@@ -113,87 +118,105 @@ def rename_meeting_files(old_raw, old_min, new_name):
             os.rename(old_raw, new_raw)
         if os.path.exists(old_min) and old_min != new_min:
             os.rename(old_min, new_min)
-
         return new_raw, new_min
     except Exception:
         return old_raw, old_min
 
 
 def process_smart_segment(client, full_payload):
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": prompts.SMART_SEGMENT_SYSTEM_PROMPT},
-                {"role": "user", "content": full_payload},
-            ],
-            temperature=0.2,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"Error IA: {str(e)}"
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": prompts.SMART_SEGMENT_SYSTEM_PROMPT},
+                    {"role": "user", "content": full_payload},
+                ],
+                temperature=0.2,
+                timeout=45,  # Prevent infinite hanging
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            if attempt < MAX_RETRIES - 1:
+                # Notify GUI of the retry attempt
+                gui_queue.put(("status", f"⚠️ AI Retry {attempt + 1}/{MAX_RETRIES}..."))
+                time.sleep(RETRY_DELAY)
+                continue
+            return f"Error IA (Final): {str(e)}"
 
 
 def generate_final_summary(client, full_minutes_text):
     gui_queue.put(("status", "🧠 Generando Resumen Final..."))
-
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": prompts.FINAL_SUMMARY_SYSTEM_PROMPT},
-                {"role": "user", "content": full_minutes_text},
-            ],
-            temperature=0.4,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"Error Resumen: {str(e)}"
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": prompts.FINAL_SUMMARY_SYSTEM_PROMPT},
+                    {"role": "user", "content": full_minutes_text},
+                ],
+                temperature=0.4,
+                timeout=120,  # Final summary needs more time
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            if attempt < MAX_RETRIES - 1:
+                gui_queue.put(
+                    ("status", f"⚠️ Summary Retry {attempt + 1}/{MAX_RETRIES}...")
+                )
+                time.sleep(RETRY_DELAY * 2)  # Longer wait for heavy processing
+                continue
+            return f"Error Resumen (Final): {str(e)}"
 
 
 def ai_worker(file_min, file_raw, initial_meeting_name=None):
-    """Worker de procesamiento de IA para segmentos de audio"""
     client = get_llm_client()
     all_minutes_text = []
-    current_file_min = file_min
-    current_file_raw = file_raw
+    current_file_min, current_file_raw = file_min, file_raw
 
-    meeting_title = initial_meeting_name or "Reunión"
+    meeting_title = initial_meeting_name or "Meeting"
+    # Create initial files
     with open(current_file_raw, "w", encoding="utf-8") as f:
         f.write(f"# RAW DATA - {meeting_title} - {datetime.now()}\n\n")
     with open(current_file_min, "w", encoding="utf-8") as f:
-        f.write(f"# BITÁCORA TÉCNICA - {meeting_title} - {datetime.now()}\n\n")
+        f.write(f"# TECHNICAL LOG - {meeting_title} - {datetime.now()}\n\n")
 
-    gui_queue.put(("status", "🟢 Sistemas Listos. Escuchando..."))
+    gui_queue.put(("status", "🟢 Systems Ready. Listening..."))
 
     while not ai_stop_event.is_set() or not text_process_queue.empty():
         try:
             if state.is_shutting_down:
-                q_size = text_process_queue.qsize()
                 gui_queue.put(
-                    ("status", f"🛑 Cierre: Procesando {q_size} bloques pendientes...")
+                    (
+                        "status",
+                        f"🛑 Shutdown: Processing {text_process_queue.qsize()} blocks...",
+                    )
                 )
 
             payload_text = text_process_queue.get(timeout=0.5)
             ts = datetime.now().strftime("%H:%M")
 
             if not state.is_shutting_down:
-                gui_queue.put(("status", f"⚡ Procesando bloque {ts}..."))
+                gui_queue.put(("status", f"⚡ Processing block {ts}..."))
 
+            # Save faithful RAW immediately as delivered by sensor
             with open(current_file_raw, "a", encoding="utf-8") as f:
                 f.write(f"\n{payload_text}\n")
                 f.flush()
                 os.fsync(f.fileno())
 
+            # Generate smart segment with IA
             minute_txt = process_smart_segment(client, payload_text)
-
             formatted_entry = f"\n## ⏱️ {ts}\n{minute_txt}\n"
             all_minutes_text.append(formatted_entry)
+
+            # Persist technical minute
             with open(current_file_min, "a", encoding="utf-8") as f:
                 f.write(formatted_entry)
                 f.flush()
                 os.fsync(f.fileno())
 
+            # Update UI (LIFO display)
             clean_ui = (
                 minute_txt.replace("### ", "")
                 .replace("**", "")
@@ -203,63 +226,55 @@ def ai_worker(file_min, file_raw, initial_meeting_name=None):
             gui_queue.put(("ai_new", f"⏱️ {ts}\n{clean_ui}\n{'-' * 40}\n"))
 
             text_process_queue.task_done()
-
         except queue.Empty:
             continue
         except Exception as e:
-            gui_queue.put(("status", f"Error IA: {e}"))
+            gui_queue.put(("status", f"AI Thread Error: {e}"))
 
+    # Post-meeting processing
     if all_minutes_text:
         full_text = "".join(all_minutes_text)
         summary = generate_final_summary(client, full_text)
 
-        gui_queue.put(("status", "🏷️ Generando nombre inteligente..."))
+        gui_queue.put(("status", "🏷️ Generating smart name..."))
         ai_suggested_name = suggest_meeting_name_with_ai(client, full_text)
 
         if ai_suggested_name:
-            gui_queue.put(("status", f"📝 Renombrando: {ai_suggested_name}"))
+            gui_queue.put(("status", f"📝 Renaming: {ai_suggested_name}"))
             current_file_raw, current_file_min = rename_meeting_files(
                 current_file_raw, current_file_min, ai_suggested_name
             )
 
-        gui_queue.put(("status", "💾 Reorganizando y Guardando..."))
-        meeting_title = initial_meeting_name or ai_suggested_name or "Reunión"
-
-        final_content = f"# 📋 MINUTA: {meeting_title}\n"
-        final_content += f"**Fecha:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-        final_content += "=" * 60 + "\n"
-        final_content += "# 🎯 RESUMEN EJECUTIVO\n"
-        final_content += "=" * 60 + "\n\n"
-        final_content += summary
-        final_content += "\n\n"
-        final_content += "=" * 60 + "\n"
-        final_content += "# 📝 BITÁCORA DETALLADA (Cronológica)\n"
-        final_content += "=" * 60 + "\n"
-        final_content += full_text
+        # Re-structure final document
+        meeting_title = initial_meeting_name or ai_suggested_name or "Meeting"
+        final_content = (
+            f"# 📋 MINUTA: {meeting_title}\n"
+            f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+            f"{'=' * 60}\n# 🎯 EXECUTIVE SUMMARY\n{'=' * 60}\n\n{summary}\n\n"
+            f"{'=' * 60}\n# 📝 CHRONOLOGICAL LOG\n{'=' * 60}\n{full_text}"
+        )
 
         with open(current_file_min, "w", encoding="utf-8") as f:
             f.write(final_content)
             f.flush()
             os.fsync(f.fileno())
-        gui_queue.put(("status", f"✅ Guardado: {os.path.basename(current_file_min)}"))
+
+        gui_queue.put(("status", f"✅ Saved: {os.path.basename(current_file_min)}"))
     else:
-        gui_queue.put(("status", "⚠️ Finalizado sin datos."))
+        gui_queue.put(("status", "⚠️ Finished without data."))
 
     gui_queue.put(("shutdown_complete", True))
 
 
 def capture_worker(translator):
-    """Worker de captura de audio con traducción en tiempo real"""
     def on_smart_block(payload):
         text_process_queue.put(payload)
 
     def on_live_feed(text_buffer):
         gui_queue.put(("live", text_buffer))
-
         if len(text_buffer) > 2:
             translator.translate_live_view(
-                text_buffer[-600:],
-                lambda trans: gui_queue.put(("trans", trans))
+                text_buffer[-600:], lambda trans: gui_queue.put(("trans", trans))
             )
 
     state.source_name = "Teams Capture"
@@ -272,11 +287,8 @@ def perform_shutdown_sequence():
 
 
 def main():
-    """Punto de entrada principal de la aplicación"""
     s_lang, t_lang = ask_config_gui()
-
-    state.source_lang = s_lang
-    state.target_lang = t_lang
+    state.source_lang, state.target_lang = s_lang, t_lang
 
     translator = rt.RealTimeTranslator(state.source_lang, state.target_lang)
 
@@ -291,20 +303,17 @@ def main():
     file_raw = generate_filename("RAW", "txt", initial_meeting_name)
     file_min = generate_filename("MINUTA", "md", initial_meeting_name)
 
-    t_ai = threading.Thread(
+    # Start independent worker threads
+    threading.Thread(
         target=ai_worker, args=(file_min, file_raw, initial_meeting_name), daemon=True
-    )
-    t_capture = threading.Thread(target=capture_worker, args=(translator,), daemon=True)
-
-    t_ai.start()
-    t_capture.start()
+    ).start()
+    threading.Thread(target=capture_worker, args=(translator,), daemon=True).start()
 
     app = MeetCopilotApp(s_lang, t_lang, gui_queue, state, perform_shutdown_sequence)
     app.mainloop()
 
 
 def hide_console():
-    """Oculta la ventana de consola en Windows"""
     if sys.platform == "win32":
         import ctypes
 
