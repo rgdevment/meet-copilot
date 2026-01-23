@@ -18,8 +18,8 @@ LM_STUDIO_URL = "http://localhost:1234/v1"
 MODEL_NAME = "local-model"
 OUTPUT_DIR = "reuniones_logs"
 
-MAX_RETRIES = 3  # Number of attempts before giving up
-RETRY_DELAY = 5  # Seconds to wait between attempts
+MAX_RETRIES = 3
+RETRY_DELAY = 5
 
 
 class AppState:
@@ -67,14 +67,29 @@ def extract_meeting_name_from_window(window_title):
     return name.strip() if name.strip() else None
 
 
-def generate_filename(prefix, extension="md", meeting_name=None):
+def setup_meeting_folder(meeting_name, fixed_timestamp):
+    """Creates a dedicated folder for the meeting using start time"""
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    if meeting_name:
-        safe_name = sanitize_filename(meeting_name)
-        return f"{OUTPUT_DIR}/{safe_name}-{timestamp}.{extension}"
-    return f"{OUTPUT_DIR}/{prefix}_{timestamp}.{extension}"
+
+    safe_name = sanitize_filename(meeting_name) if meeting_name else "Meeting"
+    folder_name = f"{safe_name}_{fixed_timestamp}"
+    folder_path = os.path.join(OUTPUT_DIR, folder_name)
+
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path)
+
+    return folder_path
+
+
+def generate_file_paths(folder_path):
+    """Generates paths for the 4 files inside the dedicated folder"""
+    return {
+        "forensic": os.path.join(folder_path, "RAW_FORENSE.txt"),
+        "live": os.path.join(folder_path, "LOG_VIVO.txt"),
+        "ai_input": os.path.join(folder_path, "IA_INPUT.txt"),
+        "minuta": os.path.join(folder_path, "MINUTA.md"),
+    }
 
 
 def suggest_meeting_name_with_ai(client, summary_text):
@@ -103,24 +118,20 @@ def suggest_meeting_name_with_ai(client, summary_text):
             return None
 
 
-def rename_meeting_files(old_raw, old_min, new_name):
+def rename_meeting_folder(current_folder_path, new_name, fixed_timestamp):
+    """Renames the entire folder, preserving the original start timestamp"""
     try:
         safe_name = sanitize_filename(new_name)
-        match = re.search(r"(\d{4}-\d{2}-\d{2}_\d{2}-\d{2})", old_raw)
-        if not match:
-            return old_raw, old_min
+        new_folder_name = f"{safe_name}_{fixed_timestamp}"
+        new_folder_path = os.path.join(OUTPUT_DIR, new_folder_name)
 
-        timestamp = match.group(1)
-        new_raw = f"{OUTPUT_DIR}/{safe_name}-{timestamp}.txt"
-        new_min = f"{OUTPUT_DIR}/{safe_name}-{timestamp}.md"
-
-        if os.path.exists(old_raw) and old_raw != new_raw:
-            os.rename(old_raw, new_raw)
-        if os.path.exists(old_min) and old_min != new_min:
-            os.rename(old_min, new_min)
-        return new_raw, new_min
-    except Exception:
-        return old_raw, old_min
+        if current_folder_path != new_folder_path:
+            os.rename(current_folder_path, new_folder_path)
+            return new_folder_path
+        return current_folder_path
+    except Exception as e:
+        print(f"Error renaming folder: {e}")
+        return current_folder_path
 
 
 def process_smart_segment(client, full_payload):
@@ -133,12 +144,11 @@ def process_smart_segment(client, full_payload):
                     {"role": "user", "content": full_payload},
                 ],
                 temperature=0.2,
-                timeout=45,  # Prevent infinite hanging
+                timeout=45,
             )
             return response.choices[0].message.content
         except Exception as e:
             if attempt < MAX_RETRIES - 1:
-                # Notify GUI of the retry attempt
                 gui_queue.put(("status", f"⚠️ AI Retry {attempt + 1}/{MAX_RETRIES}..."))
                 time.sleep(RETRY_DELAY)
                 continue
@@ -156,7 +166,7 @@ def generate_final_summary(client, full_minutes_text):
                     {"role": "user", "content": full_minutes_text},
                 ],
                 temperature=0.4,
-                timeout=120,  # Final summary needs more time
+                timeout=120,
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -164,24 +174,39 @@ def generate_final_summary(client, full_minutes_text):
                 gui_queue.put(
                     ("status", f"⚠️ Summary Retry {attempt + 1}/{MAX_RETRIES}...")
                 )
-                time.sleep(RETRY_DELAY * 2)  # Longer wait for heavy processing
+                time.sleep(RETRY_DELAY * 2)
                 continue
             return f"Error Resumen (Final): {str(e)}"
 
 
-def ai_worker(file_min, file_raw, initial_meeting_name=None):
+def ai_worker(initial_meeting_name=None):
     client = get_llm_client()
     all_minutes_text = []
-    current_file_min, current_file_raw = file_min, file_raw
+
+    # 1. Capture START time once (Fixed Timestamp)
+    start_time_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    # 2. Setup folder and file paths
+    current_folder = setup_meeting_folder(initial_meeting_name, start_time_str)
+    files = generate_file_paths(current_folder)
 
     meeting_title = initial_meeting_name or "Meeting"
-    # Create initial files
-    with open(current_file_raw, "w", encoding="utf-8") as f:
-        f.write(f"# RAW DATA - {meeting_title} - {datetime.now()}\n\n")
-    with open(current_file_min, "w", encoding="utf-8") as f:
-        f.write(f"# TECHNICAL LOG - {meeting_title} - {datetime.now()}\n\n")
 
-    gui_queue.put(("status", "🟢 Systems Ready. Listening..."))
+    # Initialize files headers
+    header = f"# LOG - {meeting_title} - Start: {start_time_str}\n\n"
+
+    with open(files["forensic"], "w", encoding="utf-8") as f:
+        f.write(f"# RAW FORENSE (Pure Data) {header}")
+    with open(files["live"], "w", encoding="utf-8") as f:
+        f.write(f"# LOG VIVO (Aggressive Clean) {header}")
+    with open(files["ai_input"], "w", encoding="utf-8") as f:
+        f.write(f"# AI INPUT (Context + Hints) {header}")
+    with open(files["minuta"], "w", encoding="utf-8") as f:
+        f.write(f"# TECHNICAL MINUTE {header}")
+
+    gui_queue.put(
+        ("status", f"🟢 Ready. Saving to: {os.path.basename(current_folder)}")
+    )
 
     while not ai_stop_event.is_set() or not text_process_queue.empty():
         try:
@@ -193,30 +218,40 @@ def ai_worker(file_min, file_raw, initial_meeting_name=None):
                     )
                 )
 
-            payload_text = text_process_queue.get(timeout=0.5)
-            ts = datetime.now().strftime("%H:%M")
+            packet = text_process_queue.get(timeout=0.5)
+
+            # Unpack
+            ts = packet.get("ts", "00:00")
+            raw_forensic = packet.get("raw_forensic", "")
+            live_clean = packet.get("live_clean", "")
+            ai_payload = packet.get("ai_payload", "")
+            meta_header = packet.get("meta_header", "")
 
             if not state.is_shutting_down:
                 gui_queue.put(("status", f"⚡ Processing block {ts}..."))
 
-            # Save faithful RAW immediately as delivered by sensor
-            with open(current_file_raw, "a", encoding="utf-8") as f:
-                f.write(f"\n{payload_text}\n")
-                f.flush()
-                os.fsync(f.fileno())
+            # Write logs (Append mode)
+            with open(files["forensic"], "a", encoding="utf-8") as f:
+                f.write(f"{meta_header}\n{raw_forensic}\n\n")
 
-            # Generate smart segment with IA
-            minute_txt = process_smart_segment(client, payload_text)
+            with open(files["live"], "a", encoding="utf-8") as f:
+                f.write(f"{meta_header}\n{live_clean}\n\n")
+
+            with open(files["ai_input"], "a", encoding="utf-8") as f:
+                f.write(f"{meta_header}\n{ai_payload}\n\n")
+
+            # Process AI
+            minute_txt = process_smart_segment(client, ai_payload)
             formatted_entry = f"\n## ⏱️ {ts}\n{minute_txt}\n"
             all_minutes_text.append(formatted_entry)
 
-            # Persist technical minute
-            with open(current_file_min, "a", encoding="utf-8") as f:
+            # Write Minute
+            with open(files["minuta"], "a", encoding="utf-8") as f:
                 f.write(formatted_entry)
                 f.flush()
                 os.fsync(f.fileno())
 
-            # Update UI (LIFO display)
+            # Update UI
             clean_ui = (
                 minute_txt.replace("### ", "")
                 .replace("**", "")
@@ -240,26 +275,32 @@ def ai_worker(file_min, file_raw, initial_meeting_name=None):
         ai_suggested_name = suggest_meeting_name_with_ai(client, full_text)
 
         if ai_suggested_name:
-            gui_queue.put(("status", f"📝 Renaming: {ai_suggested_name}"))
-            current_file_raw, current_file_min = rename_meeting_files(
-                current_file_raw, current_file_min, ai_suggested_name
+            gui_queue.put(("status", f"📝 Renaming folder: {ai_suggested_name}"))
+            # Rename folder logic
+            new_folder_path = rename_meeting_folder(
+                current_folder, ai_suggested_name, start_time_str
             )
+            # Update file paths to point to new folder location for final write
+            files = generate_file_paths(new_folder_path)
 
-        # Re-structure final document
+        # Write Final MD
         meeting_title = initial_meeting_name or ai_suggested_name or "Meeting"
         final_content = (
             f"# 📋 MINUTA: {meeting_title}\n"
-            f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+            f"**Start Date:** {start_time_str}\n\n"
             f"{'=' * 60}\n# 🎯 EXECUTIVE SUMMARY\n{'=' * 60}\n\n{summary}\n\n"
             f"{'=' * 60}\n# 📝 CHRONOLOGICAL LOG\n{'=' * 60}\n{full_text}"
         )
 
-        with open(current_file_min, "w", encoding="utf-8") as f:
+        with open(files["minuta"], "w", encoding="utf-8") as f:
             f.write(final_content)
-            f.flush()
-            os.fsync(f.fileno())
 
-        gui_queue.put(("status", f"✅ Saved: {os.path.basename(current_file_min)}"))
+        gui_queue.put(
+            (
+                "status",
+                f"✅ Saved in: {os.path.basename(new_folder_path if ai_suggested_name else current_folder)}",
+            )
+        )
     else:
         gui_queue.put(("status", "⚠️ Finished without data."))
 
@@ -286,14 +327,10 @@ def perform_shutdown_sequence():
     ai_stop_event.set()
 
 
-# main_meeting_ai.py (Ajuste en la inicialización)
-
 def main():
-    """Punto de entrada principal actualizado para la nueva GUI"""
     s_lang, t_lang = ask_config_gui()
     state.source_lang, state.target_lang = s_lang, t_lang
 
-    # 1. Creamos el traductor primero
     translator = rt.RealTimeTranslator(state.source_lang, state.target_lang)
 
     initial_meeting_name = None
@@ -304,23 +341,13 @@ def main():
     except Exception:
         pass
 
-    file_raw = generate_filename("RAW", "txt", initial_meeting_name)
-    file_min = generate_filename("MINUTA", "md", initial_meeting_name)
-
-    # 2. Iniciamos los hilos (workers)
     threading.Thread(
-        target=ai_worker, args=(file_min, file_raw, initial_meeting_name), daemon=True
+        target=ai_worker, args=(initial_meeting_name,), daemon=True
     ).start()
     threading.Thread(target=capture_worker, args=(translator,), daemon=True).start()
 
-    # 3. PASAR EL TRANSLATOR A LA APP (Cambio crítico aquí)
     app = MeetCopilotApp(
-        s_lang,
-        t_lang,
-        gui_queue,
-        state,
-        translator, # <-- Añadimos esto para el botón de cambio de idioma
-        perform_shutdown_sequence
+        s_lang, t_lang, gui_queue, state, translator, perform_shutdown_sequence
     )
     app.mainloop()
 

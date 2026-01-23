@@ -2,6 +2,7 @@ import json
 import os
 import queue
 import re
+import string
 import threading
 import time
 from collections import deque
@@ -14,40 +15,135 @@ WORD_THRESHOLD = 350
 SILENCE_TIMEOUT = 20
 MIN_WORDS_FOR_TIMEOUT = 50
 CONTEXT_OVERLAP = 150
+FUZZY_THRESHOLD = 0.80
 
-# Speakers to ignore to maintain log fidelity
 EXCLUDED_SPEAKERS = ["Usuario desconocido", "Unknown User"]
+
 
 class TeamsRecorderSmart:
     def __init__(self):
         self.start_time = time.time()
         self.last_activity_time = time.time()
-        self.buffer_lines = []
+
+        # Buffer Logic
+        self.committed_lines = []  # Lines that are finished/stable
+        self.active_line = ""  # Current line being spoken/modified by Teams
+        self.active_speaker = ""
+
         self.previous_context = ""
         self.snapshots = deque(maxlen=50)
         self.window_name = "Buscando Teams..."
-        self.last_raw = ""
+        self.last_raw_capture = ""  # To avoid processing identical frames
+
+        # Load Dictionary
         self.glossary_data = self._load_glossary()
-        self.compiled_glossary = self._compile_glossary()
+        self.glossary_keys = list(self.glossary_data.keys())
+        self.compiled_rules = self._compile_glossary_rules()
 
     def _load_glossary(self):
         path = os.path.join(os.path.dirname(__file__), "technical_glossary.json")
         if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except:
+                return {}
         return {}
 
-    def _compile_glossary(self):
-        compiled = []
-        for wrong, right in self.glossary_data.items():
-            pattern = re.compile(rf"\b{re.escape(wrong)}\b", re.IGNORECASE)
-            compiled.append((pattern, right))
-        return compiled
+    def _compile_glossary_rules(self):
+        # Compile explicit regex aliases for fast replacement
+        rules = []
+        for correct_word, data in self.glossary_data.items():
+            aliases = data.get("aliases", [])
+            live_replace = data.get("live_replace", False)
+            if not aliases:
+                continue
 
-    def _apply_fixes(self, text):
-        for pattern, right in self.compiled_glossary:
-            text = pattern.sub(right, text)
-        return text
+            aliases.sort(key=len, reverse=True)
+            pattern_str = r"(?i)\b(" + "|".join(map(re.escape, aliases)) + r")\b"
+            rules.append((re.compile(pattern_str), correct_word, live_replace))
+        return rules
+
+    # === TEXT PROCESSING UTILS ===
+
+    def _normalize_text(self, text):
+        # Strip punctuation and lowercase for logical comparison
+        if not text:
+            return ""
+        translator = str.maketrans("", "", string.punctuation)
+        return " ".join(text.translate(translator).lower().split())
+
+    def _fix_versions_dynamic(self, text):
+        # Regex for b 1 -> v1
+        return re.sub(r"(?i)\b[bB]\s?[\-]?\s?(\d+)\b", r"v\1", text)
+
+    def _generate_live_clean_text(self, text):
+        # Fast cleanup for UI/Human readability
+        if not text:
+            return ""
+        clean = text
+        clean = self._fix_versions_dynamic(clean)
+        for pattern, correct, do_replace in self.compiled_rules:
+            if do_replace:
+                clean = pattern.sub(correct, clean)
+        return clean
+
+    def _fuzzy_scan_for_hints(self, text):
+        # Deep scan for AI suggestions (heavy operation, run only on commit)
+        matches = set()
+        words = re.findall(r"\b[a-zA-Záéíóúñ]{4,}\b", text)
+
+        for word in words:
+            for key in self.glossary_keys:
+                if word.lower() == key.lower():
+                    continue
+                # Fuzzy matching ratio
+                if (
+                    SequenceMatcher(None, word.lower(), key.lower()).ratio()
+                    >= FUZZY_THRESHOLD
+                ):
+                    matches.add((word, key))
+        return matches
+
+    def _generate_ai_suggestions(self, text):
+        if not text:
+            return []
+        suggestions = []
+        seen_concepts = set()
+
+        # 1. Version Detection
+        version_matches = re.findall(r"(?i)\b[bB]\s?[\-]?\s?(\d+)\b", text)
+        for num in set(version_matches):
+            concept_id = f"VER_{num}"
+            if concept_id not in seen_concepts:
+                suggestions.append(
+                    f"- Se detectó 'b {num}' (o similar): Posiblemente sea 'v{num}'."
+                )
+                seen_concepts.add(concept_id)
+
+        # 2. Explicit Alias Detection
+        for pattern, correct, _ in self.compiled_rules:
+            if pattern.search(text):
+                concept_id = f"TERM_{correct.upper()}"
+                if concept_id not in seen_concepts:
+                    suggestions.append(
+                        f"- Se detectó término similar a '{correct}' (según diccionario)."
+                    )
+                    seen_concepts.add(concept_id)
+
+        # 3. Fuzzy Detection
+        fuzzy_hits = self._fuzzy_scan_for_hints(text)
+        for bad, correct in fuzzy_hits:
+            concept_id = f"TERM_{correct.upper()}"
+            if concept_id not in seen_concepts:
+                suggestions.append(
+                    f"- Se detectó '{bad}': Fonéticamente similar a '{correct}'."
+                )
+                seen_concepts.add(concept_id)
+
+        return suggestions
+
+    # === CORE CAPTURE LOGIC ===
 
     def _get_caption(self):
         try:
@@ -58,7 +154,6 @@ class TeamsRecorderSmart:
                 roots,
                 key=lambda w: 0 if "Meeting" in w.Name or "Reunión" in w.Name else 1,
             )
-
             for win in sorted_wins:
                 if "Chat" in win.Name:
                     continue
@@ -86,62 +181,78 @@ class TeamsRecorderSmart:
                                     and node_text.ControlTypeName == "TextControl"
                                 ):
                                     txt = node_text.Name
-                                    if txt and len(txt) > 1 and "Micrófono" not in txt:
+                                    if txt and "Micrófono" not in txt:
                                         candidates.append((node_name.Name, txt))
-                    except Exception:
+                    except:
                         continue
                 if candidates:
                     self.window_name = win.Name
                     return candidates[-1]
-        except Exception:
+        except:
             return None, None
         return None, None
 
-    def _is_similar(self, a, b):
-        return SequenceMatcher(None, a, b).ratio() > 0.85
-
     def _count_words(self):
-        full_text = " ".join(self.buffer_lines)
+        # Count words in committed lines + current active line
+        full_text = " ".join(self.committed_lines) + " " + self.active_line
         return len(full_text.split())
 
     def update(self):
         speaker, raw_text = self._get_caption()
+
+        # Basic validation
         if not raw_text or speaker in EXCLUDED_SPEAKERS:
             return False
-
         clean_text = re.sub(r"\s+", " ", raw_text).strip()
-
-        # Ignore very short OCR fragments to wait for stabilization
-        if len(clean_text) < 4:
+        if not re.search(r"[a-zA-Z0-9]", clean_text):
             return False
 
-        full_line = f"[{speaker}]: {clean_text}"
-
-        if full_line == self.last_raw:
+        # Frame deduplication (avoid processing exact same frame)
+        current_frame_signature = f"{speaker}|{clean_text}"
+        if current_frame_signature == self.last_raw_capture:
             return False
-
-        self.last_raw = full_line
+        self.last_raw_capture = current_frame_signature
         self.last_activity_time = time.time()
 
-        # Look-back deduplication to handle interleaved speakers
-        lookback_limit = min(5, len(self.buffer_lines))
-        for i in range(len(self.buffer_lines) - 1, len(self.buffer_lines) - 1 - lookback_limit, -1):
-            last_saved = self.buffer_lines[i]
-            if f"[{speaker}]" in last_saved:
-                last_content = last_saved.split("]: ", 1)[1] if "]: " in last_saved else ""
+        # === SLIDING WINDOW LOGIC ===
 
-                # Case A: New text is already part of what we saved (Ignore)
-                if clean_text in last_content:
-                    return False
+        # 1. Check if speaker changed
+        if speaker != self.active_speaker:
+            # Commit previous speaker's active line if exists
+            if self.active_line:
+                self.committed_lines.append(
+                    f"[{self.active_speaker}]: {self.active_line}"
+                )
 
-                # Case B: Saved text is part of the new reconstruction (Replace)
-                if last_content in clean_text or self._is_similar(last_content, clean_text):
-                    self.buffer_lines.pop(i)
-                    self.buffer_lines.append(full_line)
-                    return True
-                break
+            # Start new speaker block
+            self.active_speaker = speaker
+            self.active_line = clean_text
+            return True
 
-        self.buffer_lines.append(full_line)
+        # 2. Same speaker: Check if it's an update to the active line
+        # Logic: If the new text contains the old text (growth) OR shares significant overlap
+        norm_active = self._normalize_text(self.active_line)
+        norm_new = self._normalize_text(clean_text)
+
+        # Case A: Growth (Teams appended words)
+        if norm_active in norm_new:
+            self.active_line = clean_text  # Update active line to the fuller version
+            return True
+
+        # Case B: Correction (Teams changed words but context is same)
+        # Use SequenceMatcher only if lengths are comparable to avoid heavy calc on disjoint strings
+        if len(norm_new) > 0 and len(norm_active) > 0:
+            similarity = SequenceMatcher(None, norm_active, norm_new).ratio()
+            if similarity > 0.65:  # Loose threshold for corrections
+                self.active_line = clean_text
+                return True
+
+        # Case C: New Sentence (Teams cleared buffer or started new sentence)
+        # Commit the old active line and start a new one
+        if self.active_line:
+            self.committed_lines.append(f"[{self.active_speaker}]: {self.active_line}")
+
+        self.active_line = clean_text
         return True
 
     def check_snapshot(self, force_flush=False):
@@ -154,35 +265,65 @@ class TeamsRecorderSmart:
         )
 
         if is_volume or is_silence or (force_flush and current_word_count > 0):
-            return self._commit_block(current_word_count)
+            # Before committing, ensure active line is pushed to committed
+            if self.active_line:
+                self.committed_lines.append(
+                    f"[{self.active_speaker}]: {self.active_line}"
+                )
+                self.active_line = ""
+                self.active_speaker = ""
 
+            return self._commit_block(current_word_count)
         return None
 
     def _commit_block(self, count):
         timestamp = time.strftime("%H:%M")
-        raw_content = "\n".join(self.buffer_lines)
 
-        words = raw_content.split()
+        # Join all committed lines
+        raw_forensic = "\n".join(self.committed_lines)
+
+        # Generate Derived Outputs
+        live_clean = self._generate_live_clean_text(raw_forensic)
+        hints = self._generate_ai_suggestions(raw_forensic)
+
+        hints_block = ""
+        if hints:
+            hints_block = "\n--- SUGERENCIAS DEL SENSOR (GLOSARIO) ---\n" + "\n".join(
+                hints
+            )
+
+        ai_payload_str = f"=== REUNIÓN: {self.window_name} ===\n"
+        if self.previous_context:
+            ai_payload_str += f"--- CONTEXTO PREVIO ---\n...{self.previous_context}\n"
+
+        ai_payload_str += f"--- SEGMENTO ACTUAL ({count} palabras) ---\n{raw_forensic}"
+        if hints_block:
+            ai_payload_str += f"\n{hints_block}"
+
+        # Context Handover
+        words = raw_forensic.split()
         tail_words = words[-CONTEXT_OVERLAP:] if len(words) > CONTEXT_OVERLAP else words
         new_overlap = " ".join(tail_words)
 
-        final_payload = f"=== REUNIÓN: {self.window_name} ===\n"
-        if self.previous_context:
-            final_payload += f"--- CONTEXTO PREVIO ---\n...{self.previous_context}\n"
-
-        final_payload += f"--- SEGMENTO ACTUAL ({count} palabras) ---\n{raw_content}"
-
-        header = f"--- BLOQUE {timestamp} (Words: {count}) ---"
-        self.snapshots.append(f"{header}\n{final_payload}")
-
         self.previous_context = new_overlap
-        self.buffer_lines = []
+        self.committed_lines = []  # Clear committed
+        # Note: active_line is already cleared in check_snapshot
         self.start_time = time.time()
 
-        return self._apply_fixes(final_payload)
+        return {
+            "ts": timestamp,
+            "raw_forensic": raw_forensic,
+            "live_clean": live_clean,
+            "ai_payload": ai_payload_str,
+            "meta_header": f"--- BLOQUE {timestamp} (Words: {count}) ---",
+        }
 
     def flush(self):
         return self.check_snapshot(force_flush=True)
+
+
+# === EXPORTS ===
+
 
 def get_meeting_name():
     try:
@@ -199,9 +340,10 @@ def get_meeting_name():
                     continue
                 if win.Exists(0, 0):
                     return win.Name
-    except Exception:
+    except:
         pass
     return None
+
 
 def start_headless_capture(
     on_block_complete_callback, on_live_update_callback, stop_event
@@ -222,18 +364,25 @@ def start_headless_capture(
 
     with auto.UIAutomationInitializerInThread():
         recorder = TeamsRecorderSmart()
-
         try:
             while not stop_event.is_set():
                 if recorder.update():
+                    # LIVE FEED: Show committed lines + current active line
                     if on_live_update_callback:
-                        current_buffer = "\n".join(recorder.buffer_lines[-8:])
-                        on_live_update_callback(recorder._apply_fixes(current_buffer))
+                        # Combine history with the fluctuating active line
+                        current_view = list(recorder.committed_lines[-8:])
+                        if recorder.active_line:
+                            current_view.append(
+                                f"[{recorder.active_speaker}]: {recorder.active_line}"
+                            )
+
+                        raw_buffer = "\n".join(current_view)
+                        clean_visual = recorder._generate_live_clean_text(raw_buffer)
+                        on_live_update_callback(clean_visual)
 
                 payload = recorder.check_snapshot()
                 if payload:
                     block_queue.put(payload)
-
                 time.sleep(0.1)
         finally:
             final_payload = recorder.flush()
