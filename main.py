@@ -1,0 +1,84 @@
+import queue
+import sys
+import threading
+
+from capture.manager import create_capture_source, start_capture
+from config import AppConfig
+from processing.glossary import GlossaryProcessor
+from processing.pipeline import ProcessingPipeline, extract_meeting_name
+from processing.translator import Translator
+from providers import create_provider
+from ui.app import MeetingApp
+from ui.config_dialog import ConfigDialog
+
+gui_queue = queue.Queue()
+ai_stop_event = threading.Event()
+capture_stop_event = threading.Event()
+
+
+def perform_shutdown(pipeline: ProcessingPipeline, translator: Translator):
+    pipeline.is_shutting_down = True
+    translator.stop()
+    capture_stop_event.set()
+    ai_stop_event.set()
+
+
+def main():
+    config = AppConfig.load()
+    dialog = ConfigDialog(config)
+    config = dialog.run()
+    if config is None:
+        return
+
+    provider = create_provider(config)
+    glossary = GlossaryProcessor()
+    translator = Translator(config.source_lang, config.target_lang)
+    source = create_capture_source(config.platform)
+    pipeline = ProcessingPipeline(config, provider, gui_queue)
+
+    pipeline.initialize(None)
+
+    def capture_worker():
+        def on_block(payload):
+            pipeline.enqueue_block(payload)
+
+        def on_live(text):
+            gui_queue.put(("live", text))
+            if len(text) > 2:
+                translator.translate_async(
+                    text[-600:], lambda t: gui_queue.put(("trans", t))
+                )
+
+        # start_capture calls source.initialize() internally
+        start_capture(
+            source, glossary, on_block, on_live, capture_stop_event,
+            on_meeting_name_callback=lambda name: pipeline.update_meeting_name(
+                extract_meeting_name(name) or name
+            ),
+        )
+
+    def ai_worker():
+        pipeline.run(ai_stop_event)
+
+    threading.Thread(target=ai_worker, daemon=True).start()
+    threading.Thread(target=capture_worker, daemon=True).start()
+
+    app = MeetingApp(
+        config=config,
+        gui_queue=gui_queue,
+        translator=translator,
+        shutdown_callback=lambda: perform_shutdown(pipeline, translator),
+    )
+    app.on_note_callback = pipeline.add_context_note
+    app.mainloop()
+
+
+def hide_console():
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
+
+
+if __name__ == "__main__":
+    hide_console()
+    main()

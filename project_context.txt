@@ -1,0 +1,5 @@
+Stack: React, Next.js, Chakra UI v3, Node.js, PostgreSQL
+Platforms: AWS, Azure, Jarvis, Jira
+Teams: BIU, SOBR, SOCO, Andes
+Key Terms: OTP, CIAM, MMS, checkout, pipeline, deploy, backlog, sprint
+People: (add frequent participants here)
