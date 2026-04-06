@@ -6,9 +6,10 @@ from .base import CaptureSource
 logger = logging.getLogger(__name__)
 
 # Window class names across Teams versions
-_TEAMS_CLASSES = ["TeamsWebView", "Chrome_WidgetWin_1", "Microsoft Teams"]
+_TEAMS_CLASSES = ["TeamsWebView"]
+_CAPTION_KEYWORDS = ["subtítulos", "subtitulos", "captions", "subtitles"]
 _MEETING_KEYWORDS = ["meeting", "reunión", "call", "llamada", "join"]
-_CHAT_KEYWORDS = ["chat", "teams and channels"]
+_REJECT_KEYWORDS = ["chat", "teams and channels"]
 _CAPTION_NOISE = ["Micrófono", "Microphone", "Muted", "Silenciado"]
 
 
@@ -41,7 +42,17 @@ class TeamsWindowsCapture(CaptureSource):
 
     def get_meeting_name(self) -> str | None:
         win = self._find_meeting_window()
-        return win.Name if win else None
+        if not win:
+            return None
+        name = win.Name or ""
+        # Strip Teams UI prefixes/suffixes from pop-out windows
+        for prefix in ["Subtítulos | ", "Subtitulos | ", "Captions | ", "Subtitles | "]:
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+        for suffix in [" | Ventana anclada", " | Pinned window"]:
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+        return name.strip() or None
 
     def get_caption(self) -> tuple[str | None, str | None]:
         web_area = self._get_web_area()
@@ -56,42 +67,50 @@ class TeamsWindowsCapture(CaptureSource):
     def _find_meeting_window(self):
         auto = self._auto
 
-        # Strategy 1: known class names
-        for cls in _TEAMS_CLASSES:
+        try:
+            root = auto.GetRootControl()
+        except Exception:
+            return None
+
+        caption_win = None
+        meeting_win = None
+        teams_fallback = None
+
+        for win in root.GetChildren():
             try:
-                roots = auto.WindowControl(searchDepth=1, ClassName=cls).GetChildren()
-                if not roots:
+                cls = win.ClassName or ""
+                if cls not in _TEAMS_CLASSES:
                     continue
-                # Prioritize meeting windows over chat
-                sorted_wins = sorted(
-                    roots,
-                    key=lambda w: 0
-                    if any(k in (w.Name or "").lower() for k in _MEETING_KEYWORDS)
-                    else 1,
-                )
-                for win in sorted_wins:
-                    name_lower = (win.Name or "").lower()
-                    if any(k in name_lower for k in _CHAT_KEYWORDS):
-                        continue
-                    if win.Exists(0, 0):
-                        return win
+                name = win.Name or ""
+                name_lower = name.lower()
+
+                if not name_lower or not win.Exists(0, 0):
+                    continue
+
+                if "microsoft teams" not in name_lower:
+                    continue
+
+                if any(k in name_lower for k in _REJECT_KEYWORDS):
+                    continue
+
+                # Prefer caption pop-out window (best source)
+                if any(k in name_lower for k in _CAPTION_KEYWORDS):
+                    caption_win = win
+                    continue
+
+                # Meeting window
+                if any(k in name_lower for k in _MEETING_KEYWORDS):
+                    meeting_win = win
+                    continue
+
+                # Any other Teams window (not chat)
+                if teams_fallback is None:
+                    teams_fallback = win
+
             except Exception:
                 continue
 
-        # Strategy 2: search all top-level windows by title
-        try:
-            root = auto.GetRootControl()
-            for win in root.GetChildren():
-                name_lower = (win.Name or "").lower()
-                if "teams" in name_lower and any(
-                    k in name_lower for k in _MEETING_KEYWORDS
-                ):
-                    if win.Exists(0, 0):
-                        return win
-        except Exception:
-            pass
-
-        return None
+        return caption_win or meeting_win or teams_fallback
 
     def _get_web_area(self):
         auto = self._auto
