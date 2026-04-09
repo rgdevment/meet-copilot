@@ -62,6 +62,10 @@ class TeamsWindowsCapture(CaptureSource):
         candidates = self._extract_captions(web_area)
         if candidates:
             return candidates[-1]
+
+        # Captions not found in cached area — invalidate so next call re-discovers
+        self._cached_web_area = None
+        self._cache_ts = 0
         return None, None
 
     def _find_meeting_window(self):
@@ -137,13 +141,15 @@ class TeamsWindowsCapture(CaptureSource):
                     searchDepth=search_depth, AutomationId="RootWebArea"
                 )
                 if web_area.Exists(0, 0):
-                    self._cached_web_area = web_area
-                    self._cache_ts = now
-                    return web_area
+                    # Verify this web area actually has captions before caching
+                    if self._extract_captions(web_area):
+                        self._cached_web_area = web_area
+                        self._cache_ts = now
+                        return web_area
             except Exception:
                 continue
 
-        # Fallback: use the window itself as root
+        # Fallback: use the window itself as root (broader search)
         self._cached_web_area = win
         self._cache_ts = now
         return win
