@@ -2,6 +2,38 @@ import queue
 import sys
 import threading
 
+REQUIRED_PACKAGES = {
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "google.generativeai": "google-generativeai",
+    "deep_translator": "deep-translator",
+    "customtkinter": "customtkinter",
+}
+
+if sys.platform == "win32":
+    REQUIRED_PACKAGES["uiautomation"] = "uiautomation"
+elif sys.platform == "darwin":
+    REQUIRED_PACKAGES["ApplicationServices"] = "pyobjc-framework-ApplicationServices"
+    REQUIRED_PACKAGES["Quartz"] = "pyobjc-framework-Quartz"
+
+
+def check_dependencies():
+    missing = []
+    for module, package in REQUIRED_PACKAGES.items():
+        try:
+            __import__(module)
+        except ImportError:
+            missing.append(package)
+    if missing:
+        print("\n[ERROR] Missing required packages:\n")
+        for pkg in missing:
+            print(f"  - {pkg}")
+        print("\nRun:  pip install -r requirements.txt\n")
+        sys.exit(1)
+
+
+check_dependencies()
+
 from capture.manager import create_capture_source, start_capture
 from config import AppConfig
 from processing.glossary import GlossaryProcessor
