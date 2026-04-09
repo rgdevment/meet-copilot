@@ -293,6 +293,8 @@ class MeetingApp(ctk.CTk):
             self.topic_label.configure(text=f"📌 Note added: {note[:60]}")
 
     def _poll_queue(self):
+        if self._is_shutting_down:
+            return
         try:
             while True:
                 action, data = self.gui_queue.get_nowait()
@@ -325,12 +327,24 @@ class MeetingApp(ctk.CTk):
                 elif action == "shutdown_complete":
                     if data and os.path.isfile(data):
                         os.startfile(data)
-                    self.destroy()
+                    self._safe_destroy()
                     return
 
         except queue.Empty:
             pass
-        self.after(100, self._poll_queue)
+        if not self._is_shutting_down:
+            self.after(100, self._poll_queue)
+
+    def _safe_destroy(self):
+        try:
+            for after_id in self.tk.call("after", "info"):
+                self.after_cancel(after_id)
+        except Exception:
+            pass
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     def _on_close(self):
         if self._is_shutting_down:
