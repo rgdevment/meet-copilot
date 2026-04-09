@@ -4,7 +4,7 @@
   "api_base_url": "http://localhost:1234/v1",
   "model_name": "local-model",
   "platform": "auto",
-  "source_lang": "es",
-  "target_lang": "en",
+  "source_lang": "en",
+  "target_lang": "es",
   "output_dir": "Z:\\Code\\Personal\\meets\\reuniones_logs"
 }
