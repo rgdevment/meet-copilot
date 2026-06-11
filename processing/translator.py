@@ -6,9 +6,12 @@ from deep_translator import GoogleTranslator
 
 class Translator:
     def __init__(self, source_lang: str, target_lang: str):
+        # source is always auto-detected so mixed Spanish/English (Spanglish)
+        # lines don't get mangled by a forced source language. source_lang is
+        # kept only as the UI "listening" label.
         self.source = source_lang
         self.target = target_lang
-        self.translator = GoogleTranslator(source=source_lang, target=target_lang)
+        self.translator = GoogleTranslator(source="auto", target=target_lang)
 
         self._latest_text = ""
         self._last_translated = ""
@@ -32,7 +35,7 @@ class Translator:
 
     def swap_languages(self):
         self.source, self.target = self.target, self.source
-        self.translator = GoogleTranslator(source=self.source, target=self.target)
+        self.translator = GoogleTranslator(source="auto", target=self.target)
         self._last_translated = ""
 
     def stop(self):

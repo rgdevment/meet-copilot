@@ -10,10 +10,18 @@ FUZZY_THRESHOLD = 0.80
 
 
 class GlossaryProcessor:
-    def __init__(self, glossary_path: str = DEFAULT_GLOSSARY_PATH):
+    def __init__(self, glossary_path: str = DEFAULT_GLOSSARY_PATH, passive: bool = True):
         self.data = self._load(glossary_path)
         self.keys = list(self.data.keys())
         self.compiled_rules = self._compile_rules()
+        # Passive mode (Fase 4): feed canonical terms to the LLM as context
+        # instead of rewriting captions with blind alias substitutions.
+        self.passive = passive
+
+    def get_terms_context(self) -> str:
+        """Canonical project terms, handed to the LLM so it fixes Spanglish in
+        context instead of a destructive regex pass."""
+        return ", ".join(self.keys) if self.keys else ""
 
     def _load(self, path: str) -> dict:
         if os.path.exists(path):
@@ -40,13 +48,18 @@ class GlossaryProcessor:
         if not text:
             return ""
         clean = self._fix_versions(text)
+        # Passive: don't blindly rewrite aliases (a wrong alias destroys context
+        # the LLM could have recovered). Only the safe version fix is applied.
+        if self.passive:
+            return clean
         for pattern, correct, do_replace in self.compiled_rules:
             if do_replace:
                 clean = pattern.sub(correct, clean)
         return clean
 
     def generate_ai_suggestions(self, text: str) -> list[str]:
-        if not text:
+        # Passive: no speculative hints injected into the LLM input.
+        if self.passive or not text:
             return []
         suggestions = []
         seen = set()
@@ -93,7 +106,7 @@ class GlossaryProcessor:
             if low not in seen_words:
                 seen_words.add(low)
                 unique_words.append(w)
-        for word in unique_words[:100]:
+        for word in unique_words[:400]:
             for key in self.keys:
                 if word.lower() == key.lower():
                     continue

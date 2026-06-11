@@ -1,117 +1,86 @@
-# Meet Copilot Pro - AI Meeting Architect (GUI Edition)
+# Meet Copilot Pro — Asistente de minutas con IA
 
-Aplicación de escritorio para orquestar reuniones inteligentes en Windows. Utiliza automatización de UI para capturar subtítulos de Microsoft Teams, procesarlos con Inteligencia Artificial Local (LM Studio) y generar documentación técnica en tiempo real.
+Aplicación de escritorio (Windows) que captura los **subtítulos en vivo de Microsoft Teams y Zoom** mediante automatización de UI (`uiautomation`), los muestra y traduce en tiempo real, y genera una **minuta técnica coherente con IA al cerrar la reunión**.
 
-> **NOTA IMPORTANTE:** Esta versión (v2.0) soporta **EXCLUSIVAMENTE MICROSOFT TEAMS** como fuente de audio/texto.
+## Cómo funciona (arquitectura)
 
-## Características Técnicas
+La tubería separa captura, persistencia y síntesis:
 
-* **Interfaz:** GUI Nativa (Tkinter) con Modo Oscuro (VS Code Theme). Estabilidad total sin parpadeos.
-* **Captura:** `uiautomation` sobre el DOM de Teams (Scraping de Accessibility Tree).
-* **IA:** Conexión a LM Studio vía API compatible con OpenAI (Localhost).
-* **Procesamiento:** Lógica LIFO (Last In First Out) para visualización y colas FIFO para procesamiento de archivos.
-* **Traducción:** Instantánea en hilo dedicado.
-* **Salida:** Archivos Markdown (.md) para Raw Data y Bitácora Técnica.
+1. **Captura** (`capture/`): lee todos los nodos de subtítulo visibles y reconcilia el stream volátil (líneas que crecen y se reescriben) en un transcript estable, por hablante, con deduplicación de historial.
+2. **Persistencia** (fuente de verdad): el transcript crudo se guarda siempre en disco antes de tocar la IA, así un fallo de IA o de red nunca pierde la reunión.
+3. **Síntesis** (`processing/pipeline.py`): al cerrar la reunión se genera la minuta **en una sola pasada** sobre el transcript completo (coherencia de principio a fin, no fragmentos). Para reuniones muy largas hay un modo map-reduce que se activa solo por encima de un umbral de palabras.
 
-## Requisitos Previos
+La vista en vivo (captions + traducción) es un feed directo sin IA; la minuta de calidad se genera al final.
 
-1.  **Sistema Operativo:** Windows 10 o 11 (Obligatorio para `uiautomation`).
-2.  **Python:** Versión 3.10 o superior.
-3.  **LM Studio:** Instalado y ejecutando un servidor local.
-4.  **Microsoft Teams:** Aplicación de escritorio (Nueva o Clásica) con **Subtítulos en Vivo activados** durante la reunión.
+## Características
 
-## Estructura del Proyecto
+* **Plataformas:** Microsoft Teams y Zoom (auto-detección o selección manual).
+* **Proveedores de IA:** OpenAI, Anthropic (Claude), Google Gemini y LM Studio (local). Configurable.
+* **Spanglish:** la minuta se genera en español preservando los términos técnicos en inglés; el glosario del proyecto se entrega como contexto al modelo. La traducción en vivo auto-detecta el idioma de origen.
+* **Traducción** en vivo en hilo dedicado.
+* **Observabilidad:** caja negra de cada lectura de subtítulo y dump del árbol UI bajo demanda (ver abajo).
+* **Salida:** Markdown con la minuta + la transcripción completa, en `reuniones_logs/`.
 
-* `main_meeting_ai.py`: Entry point. Gestiona la GUI, hilos de IA y orquestación.
-* `teams_stream_capture.py`: Módulo de bajo nivel para leer la memoria de la ventana de Teams.
-* `realtime_translator.py`: Servicio de traducción (Google/DeepL wrapper).
-* `reuniones_logs/`: Directorio de salida automática.
+## Requisitos
+
+1. **SO:** Windows 10/11 (obligatorio para `uiautomation`).
+2. **Python:** 3.10 o superior.
+3. **Subtítulos en vivo activados** en Teams/Zoom durante la reunión.
+4. **Clave de IA:** según el proveedor (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`) o un servidor LM Studio local en `http://localhost:1234`.
 
 ## Instalación
 
-1.  Clona el repositorio:
-    ```bash
-    git clone <tu-repo>
-    cd meet-copilot
-    ```
+```bash
+git clone <tu-repo>
+cd meet-copilot
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-2.  Crea y activa el entorno virtual:
-    ```bash
-    python -m venv .venv
-    .venv\Scripts\activate
-    ```
+Verifica el entorno con el doctor:
 
-3.  Instala las dependencias:
-    Usa el archivo `requirements.txt` y ejecuta `pip install -r requirements.txt`:
-
-## Configuración de LM Studio (Critico)
-
-Para que el Tech Lead funcione:
-1.  Carga un modelo ligero pero capaz (ej: `Llama-3-8B-Instruct-v2` o `Mistral-Nemo`).
-2.  Ve a la pestaña **Developer/Server** (icono `<->`).
-3.  **Context Length:** Ajústalo a `8192` (necesario para el resumen final).
-4.  **Port:** `1234` (default).
-5.  Presiona **Start Server**.
+```bash
+python doctor.py
+```
 
 ## Ejecución
 
-### Método 1: Consola
 ```bash
-python main_meeting_ai.py
+python main.py
+```
 
-## Ejecucion Rapida (Lanzador de Escritorio)
+Al iniciar se abre el diálogo de configuración (proveedor, modelo, plataforma, idiomas). La configuración se guarda en `meets_config.json`.
 
+## Configuración
 
+`meets_config.json` (se crea desde la GUI). Campos relevantes:
 
-Para ejecutar el asistente con un doble clic desde tu escritorio sin abrir consolas manualmente, crea un archivo .bat:
+| Campo | Valores | Descripción |
+|---|---|---|
+| `ai_provider` | `openai` / `anthropic` / `gemini` / `lmstudio` | Proveedor de IA. |
+| `model_name` | (según proveedor) | Modelo a usar. |
+| `platform` | `auto` / `teams` / `zoom` | Fuente de captura. |
+| `source_lang` / `target_lang` | `es` / `en` / `pt` / `fr` | Idioma de escucha (etiqueta) y de traducción. |
+| `pipeline_mode` | `single_pass` (default) / `incremental` | Minuta al final vs. modo incremental antiguo. |
+| `capture_all_nodes` | `true` (default) / `false` | Leer todos los nodos de subtítulo vs. solo el último. |
+| `glossary_passive` | `true` (default) / `false` | Glosario como contexto vs. reemplazo de texto. |
 
+## Diagnóstico
 
+Cuando "se pierden palabras" o Teams/Zoom cambian su estructura interna:
 
-1. Abre el Bloc de Notas.
+* **`reuniones_logs/_diag/raw_uia_<fecha>.jsonl`**: una línea por lectura de subtítulo con la decisión tomada (caja negra para rastrear pérdidas).
+* **`reuniones_logs/_diag/meetcopilot.log`**: log de la app (pon `MEETCOPILOT_DEBUG=1` para nivel DEBUG).
+* **Botón 🩺 en la GUI**: vuelca el árbol UI Automation a `_diag/uia_tree_<fecha>.txt` para re-mapear el parser si Teams/Zoom cambiaron su DOM.
 
-2. Pega el siguiente codigo:
+## Estructura del proyecto
 
-
-
-   @echo off
-
-   title Meet Copilot Pro Launcher
-
-
-
-   :: Ajusta la carpeta si clonaste el repo en otro lugar
-
-   cd /d "%USERPROFILE%\meet-copilot"
-
-
-
-   :: Activa el entorno y lanza la app
-
-   call .venv\Scripts\activate
-
-   cls
-
-   echo  ================================================
-
-   echo    MEET COPILOT PRO - ORQUESTADOR IA
-
-   echo  ================================================
-
-   echo.
-
-   python main_meeting_ai.py
-
-
-
-   echo.
-
-   echo El programa se ha cerrado.
-
-   pause
-
-
-
-3. Guardalo en tu Escritorio con el nombre Iniciar_Copilot.bat.
-
-4. Listo! Solo haz doble clic para iniciar la sesion.
-
+* `main.py` — entry point: configura logging, hilos de captura e IA, y la GUI.
+* `capture/` — fuentes de captura (`teams_windows.py`, `zoom_windows.py`), `manager.py` (reconciliación), `recorder.py` (caja negra), `diagnostics.py` (dump UIA).
+* `processing/` — `pipeline.py` (síntesis), `glossary.py`, `translator.py`.
+* `providers/` — adaptadores de OpenAI/Anthropic/Gemini/LM Studio.
+* `prompts.py` — prompts de síntesis.
+* `ui/` — GUI (`customtkinter`).
+* `reuniones_logs/` — salida (minutas + transcript + `_diag/`).
+* `REDESIGN_PLAN.md` — diseño de la tubería y decisiones de arquitectura.

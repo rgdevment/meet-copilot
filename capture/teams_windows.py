@@ -54,19 +54,17 @@ class TeamsWindowsCapture(CaptureSource):
                 name = name[: -len(suffix)]
         return name.strip() or None
 
-    def get_caption(self) -> tuple[str | None, str | None]:
+    def get_captions(self) -> list[tuple[str | None, str | None]]:
         web_area = self._get_web_area()
         if not web_area:
-            return None, None
+            return []
+        # No captions right now is normal silence, not a stale cache. The cache
+        # is only dropped in _get_web_area when the area stops Exists()-ing.
+        return self._extract_captions(web_area)
 
-        candidates = self._extract_captions(web_area)
-        if candidates:
-            return candidates[-1]
-
-        # Captions not found in cached area — invalidate so next call re-discovers
-        self._cached_web_area = None
-        self._cache_ts = 0
-        return None, None
+    def get_caption(self) -> tuple[str | None, str | None]:
+        caps = self.get_captions()
+        return caps[-1] if caps else (None, None)
 
     def _find_meeting_window(self):
         auto = self._auto
@@ -112,6 +110,7 @@ class TeamsWindowsCapture(CaptureSource):
                     teams_fallback = win
 
             except Exception:
+                logger.debug("Teams window scan: skipped a window", exc_info=True)
                 continue
 
         return caption_win or meeting_win or teams_fallback
@@ -147,6 +146,9 @@ class TeamsWindowsCapture(CaptureSource):
                         self._cache_ts = now
                         return web_area
             except Exception:
+                logger.debug(
+                    "Teams web area search failed at depth %s", search_depth, exc_info=True
+                )
                 continue
 
         # Fallback: use the window itself as root (broader search)
@@ -167,6 +169,7 @@ class TeamsWindowsCapture(CaptureSource):
                     except Exception:
                         continue
             except Exception:
+                logger.debug("Teams caption walk failed at depth %s", max_d, exc_info=True)
                 continue
 
             if candidates:

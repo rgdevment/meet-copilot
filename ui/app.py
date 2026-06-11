@@ -80,6 +80,11 @@ class MeetingApp(ctk.CTk):
         )
         self.lang_btn.pack(side="right", padx=10)
 
+        self.diag_btn = ctk.CTkButton(
+            header, text="🩺", width=36, height=30, command=self._dump_uia
+        )
+        self.diag_btn.pack(side="right", padx=4)
+
         # Context bar (topic display + quick note input)
         ctx_bar = ctk.CTkFrame(self, height=36, corner_radius=0, fg_color="#1e1e3a")
         ctx_bar.pack(fill="x")
@@ -284,6 +289,25 @@ class MeetingApp(ctk.CTk):
         widget = target.get(panel)
         if widget:
             widget.delete("1.0", "end")
+
+    def _dump_uia(self):
+        from capture.diagnostics import dump_uia_tree
+
+        diag_dir = os.path.join(self.config.output_dir, "_diag")
+        self.status_label.configure(text="Generando dump UIA...")
+
+        def work():
+            path = dump_uia_tree(diag_dir)
+            if path:
+                self.gui_queue.put(("status", f"Dump UIA: {os.path.basename(path)}"))
+                try:
+                    os.startfile(os.path.dirname(path))
+                except Exception:
+                    pass
+            else:
+                self.gui_queue.put(("status", "Dump UIA falló (revisa logs)"))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _on_add_note(self):
         note = self.note_entry.get().strip()

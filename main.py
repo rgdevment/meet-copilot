@@ -54,6 +54,24 @@ ai_stop_event = threading.Event()
 capture_stop_event = threading.Event()
 
 
+def setup_logging(output_dir: str):
+    import logging
+    import os
+
+    diag_dir = os.path.join(output_dir, "_diag")
+    os.makedirs(diag_dir, exist_ok=True)
+    level = logging.DEBUG if os.environ.get("MEETCOPILOT_DEBUG") else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler(
+                os.path.join(diag_dir, "meetcopilot.log"), encoding="utf-8"
+            )
+        ],
+    )
+
+
 def perform_shutdown(pipeline: ProcessingPipeline, translator: Translator):
     pipeline.is_shutting_down = True
     translator.stop()
@@ -68,11 +86,13 @@ def main():
     if config is None:
         return
 
+    setup_logging(config.output_dir)
+
     provider = create_provider(config)
-    glossary = GlossaryProcessor()
+    glossary = GlossaryProcessor(passive=config.glossary_passive)
     translator = Translator(config.source_lang, config.target_lang)
     source = create_capture_source(config.platform)
-    pipeline = ProcessingPipeline(config, provider, gui_queue)
+    pipeline = ProcessingPipeline(config, provider, gui_queue, glossary=glossary)
 
     pipeline.initialize(None)
 
@@ -87,12 +107,19 @@ def main():
                     text[-600:], lambda t: gui_queue.put(("trans", t))
                 )
 
+        import os
+
+        diag_dir = os.path.join(config.output_dir, "_diag")
+
         # start_capture calls source.initialize() internally
         start_capture(
             source, glossary, on_block, on_live, capture_stop_event,
             on_meeting_name_callback=lambda name: pipeline.update_meeting_name(
                 extract_meeting_name(name) or name
             ),
+            diag_dir=diag_dir,
+            read_all_nodes=config.capture_all_nodes,
+            on_status_callback=lambda msg: gui_queue.put(("status", msg)),
         )
 
     def ai_worker():

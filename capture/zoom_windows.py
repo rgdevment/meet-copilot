@@ -52,17 +52,31 @@ class ZoomWindowsCapture(CaptureSource):
         win = self._find_meeting_window()
         return win.Name if win else None
 
-    def get_caption(self) -> tuple[str | None, str | None]:
+    def get_captions(self) -> list[tuple[str | None, str | None]]:
         caption_list = self._get_caption_list()
         if not caption_list:
-            return None, None
+            return []
 
-        items = caption_list.GetChildren()
-        if not items:
-            return None, None
+        try:
+            items = caption_list.GetChildren()
+        except Exception:
+            logger.debug("Zoom caption list read failed", exc_info=True)
+            return []
 
-        last_item = items[-1]
-        return self._parse_caption_item(last_item)
+        out = []
+        for item in items:
+            try:
+                speaker, text = self._parse_caption_item(item)
+            except Exception:
+                logger.debug("Zoom caption item parse failed", exc_info=True)
+                continue
+            if text:
+                out.append((speaker, text))
+        return out
+
+    def get_caption(self) -> tuple[str | None, str | None]:
+        caps = self.get_captions()
+        return caps[-1] if caps else (None, None)
 
     def _find_meeting_window(self):
         auto = self._auto

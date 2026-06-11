@@ -57,6 +57,21 @@ CAPTURE_DEFAULTS = {
     "min_words_for_timeout": 50,
     "context_overlap": 150,
     "fuzzy_threshold": 0.80,
+    # Fase 3: a line is committed once it stays unchanged this long (debounce).
+    "line_debounce_sec": 1.2,
+    # Below this similarity, an incoming frame is a new line, not an in-place
+    # correction. Kept high so two distinct sentences are never fused into one.
+    "merge_similarity": 0.80,
+    # Seconds of "window present but zero captions" before warning the user.
+    "no_caption_warn_sec": 25,
+}
+
+# Fase 1: single-pass synthesis over the full transcript at meeting end.
+# Chunking (map-reduce) only kicks in above the word limit; inactive for ~1h meetings.
+SYNTHESIS_DEFAULTS = {
+    "single_pass_word_limit": 9000,
+    "chunk_size_words": 6000,
+    "chunk_overlap_words": 400,
 }
 
 MAX_RETRIES = 3
@@ -75,6 +90,13 @@ class AppConfig:
     source_lang: str = "es"
     target_lang: str = "en"
     output_dir: str = ""
+    # "single_pass": one minute over the full transcript at the end (default).
+    # "incremental": legacy per-block mini-minutes.
+    pipeline_mode: str = "single_pass"
+    # Fase 3: read every visible caption node, not just the last one.
+    capture_all_nodes: bool = True
+    # Fase 4: feed the glossary to the LLM as context instead of rewriting text.
+    glossary_passive: bool = True
 
     def __post_init__(self):
         if not self.output_dir:

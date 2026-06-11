@@ -4,6 +4,7 @@ import re
 import string
 import threading
 import time
+from collections import deque
 from difflib import SequenceMatcher
 
 from config import CAPTURE_DEFAULTS, EXCLUDED_SPEAKERS
@@ -12,91 +13,202 @@ from .base import CaptureSource
 
 logger = logging.getLogger(__name__)
 
+_PUNCT_TABLE = str.maketrans("", "", string.punctuation)
+
 
 class CaptureManager:
     """
-    Platform-agnostic capture manager that uses a CaptureSource to read
-    captions and handles buffering, deduplication, block commitment.
+    Platform-agnostic capture manager. Reads captions from a CaptureSource and
+    reconciles the volatile caption stream (lines that grow and get rewritten
+    in place) into a stable transcript.
+
+    Reconciliation keeps one in-flight line per speaker; an incoming frame for a
+    speaker is merged into their line when it is a prefix/high-similarity
+    continuation (keeping the longer text so words are never dropped), and only
+    starts a new line when it clearly diverges. A line is committed once it has
+    been stable for `line_debounce_sec`, so block boundaries never cut an open
+    line.
     """
 
-    def __init__(self, source: CaptureSource, glossary_processor=None):
+    def __init__(
+        self,
+        source: CaptureSource,
+        glossary_processor=None,
+        recorder=None,
+        read_all_nodes: bool = True,
+    ):
         self.source = source
         self.glossary = glossary_processor
+        self.recorder = recorder
+        self.read_all_nodes = read_all_nodes
 
         self.start_time = time.time()
         self.last_activity_time = time.time()
+        self.last_caption_time = time.time()
 
         self.committed_lines: list[str] = []
-        self.active_line = ""
-        self.active_speaker = ""
+        # speaker -> {"text": str, "ts": last-change time}
+        self.tracks: dict[str, dict] = {}
+        # Recently committed (speaker, normalized-text) signatures. Reading all
+        # visible nodes re-emits already-scrolled history lines every poll; this
+        # guards against re-committing them.
+        self.recent_committed: deque = deque(maxlen=80)
 
         self.previous_context = ""
         self.window_name = ""
-        self.last_raw_capture = ""
 
         self.word_threshold = CAPTURE_DEFAULTS["word_threshold"]
         self.silence_timeout = CAPTURE_DEFAULTS["silence_timeout"]
         self.min_words_for_timeout = CAPTURE_DEFAULTS["min_words_for_timeout"]
         self.context_overlap = CAPTURE_DEFAULTS["context_overlap"]
+        self.debounce = CAPTURE_DEFAULTS["line_debounce_sec"]
+        self.merge_similarity = CAPTURE_DEFAULTS["merge_similarity"]
+
+        # Health counters (Fase 0)
+        self.reads = 0
+        self.discarded = 0
 
     def _normalize_text(self, text: str) -> str:
         if not text:
             return ""
-        translator = str.maketrans("", "", string.punctuation)
-        return " ".join(text.translate(translator).lower().split())
+        return " ".join(text.translate(_PUNCT_TABLE).lower().split())
+
+    @staticmethod
+    def _common_prefix_len(a: str, b: str) -> int:
+        n = 0
+        for ca, cb in zip(a, b):
+            if ca != cb:
+                break
+            n += 1
+        return n
 
     def _count_words(self) -> int:
-        full_text = " ".join(self.committed_lines) + " " + self.active_line
-        return len(full_text.split())
+        # Block size counts only completed lines. The volatile caption node holds
+        # the whole growing line, so committing a still-open line would duplicate
+        # it next poll; a non-stop monologue therefore stays one in-flight line
+        # until the speaker pauses (debounce) and commits once. No data is lost.
+        return len(" ".join(self.committed_lines).split())
+
+    def _record(self, speaker, text, decision):
+        if self.recorder:
+            self.recorder.log(speaker, text, decision)
 
     def update(self) -> bool:
-        speaker, raw_text = self.source.get_caption()
-
-        if not raw_text or speaker in EXCLUDED_SPEAKERS:
-            return False
-        clean_text = re.sub(r"\s+", " ", raw_text).strip()
-        if not re.search(r"[a-zA-Z0-9]", clean_text):
-            return False
-
-        frame_sig = f"{speaker}|{clean_text}"
-        if frame_sig == self.last_raw_capture:
-            return False
-        self.last_raw_capture = frame_sig
-        self.last_activity_time = time.time()
+        if self.read_all_nodes:
+            observations = self.source.get_captions()
+        else:
+            speaker, text = self.source.get_caption()
+            observations = [(speaker, text)] if text else []
 
         if hasattr(self.source, "window_name"):
             self.window_name = self.source.window_name
 
-        if speaker != self.active_speaker:
-            if self.active_line:
-                self.committed_lines.append(
-                    f"[{self.active_speaker}]: {self.active_line}"
-                )
-            self.active_speaker = speaker or ""
-            self.active_line = clean_text
+        changed = False
+        now = time.time()
+        for speaker, raw_text in observations:
+            self.reads += 1
+            if not raw_text or speaker in EXCLUDED_SPEAKERS:
+                self.discarded += 1
+                self._record(speaker, raw_text, "excluded_speaker")
+                continue
+            clean_text = re.sub(r"\s+", " ", raw_text).strip()
+            if not re.search(r"[a-zA-Z0-9]", clean_text):
+                self.discarded += 1
+                self._record(speaker, clean_text, "no_alnum")
+                continue
+            self.last_caption_time = now
+            if self._ingest(speaker or "", clean_text, now):
+                changed = True
+
+        if self._commit_stale(now):
+            changed = True
+        return changed
+
+    def _ingest(self, speaker: str, text: str, now: float) -> bool:
+        track = self.tracks.get(speaker)
+        if track is None:
+            self.tracks[speaker] = {"text": text, "ts": now}
+            self.last_activity_time = now
+            self._record(speaker, text, "new_open")
             return True
 
-        norm_active = self._normalize_text(self.active_line)
-        norm_new = self._normalize_text(clean_text)
+        prev = track["text"]
+        if text == prev:
+            self._record(speaker, text, "dup_exact")
+            return False
 
-        if norm_active in norm_new:
-            self.active_line = clean_text
-            return True
+        np_, nt = self._normalize_text(prev), self._normalize_text(text)
 
-        if len(norm_new) > 0 and len(norm_active) > 0:
-            similarity = SequenceMatcher(None, norm_active, norm_new).ratio()
-            if similarity > 0.65:
-                self.active_line = clean_text
+        if np_ == nt:
+            # Same content, different casing/punctuation — keep the longer form.
+            if len(text) > len(prev):
+                track["text"] = text
+                self._record(speaker, text, "dup_norm_longer")
                 return True
+            self._record(speaker, text, "dup_norm")
+            return False
 
-        if self.active_line:
-            self.committed_lines.append(
-                f"[{self.active_speaker}]: {self.active_line}"
-            )
-        self.active_line = clean_text
+        if np_ and (nt.startswith(np_) or np_ in nt):
+            track["text"] = text
+            track["ts"] = now
+            self.last_activity_time = now
+            self._record(speaker, text, "grow")
+            return True
+
+        # Same line being rewritten as it grows (e.g. "bakloc" → "backlog
+        # grooming"): a long shared prefix is a more robust signal than a global
+        # ratio, which a simultaneous correction+growth drags below threshold.
+        shorter = min(len(np_), len(nt))
+        prefix_ratio = self._common_prefix_len(np_, nt) / shorter if shorter else 0.0
+        ratio = SequenceMatcher(None, np_, nt).ratio() if np_ and nt else 0.0
+        if prefix_ratio >= 0.5 or ratio >= self.merge_similarity:
+            # Keep the newest emission — it carries the correction even if shorter.
+            track["text"] = text
+            track["ts"] = now
+            self.last_activity_time = now
+            self._record(speaker, text, f"merge_p{prefix_ratio:.2f}_r{ratio:.2f}")
+            return True
+
+        # Divergent: the previous line is done, this is a new one.
+        self._commit_line(speaker, prev)
+        self.tracks[speaker] = {"text": text, "ts": now}
+        self.last_activity_time = now
+        self._record(speaker, text, "newline")
         return True
 
+    def _commit_line(self, speaker: str, text: str):
+        if not text:
+            return
+        sig = (speaker, self._normalize_text(text))
+        if sig in self.recent_committed:
+            self._record(speaker, text, "dup_committed_skip")
+            return
+        self.recent_committed.append(sig)
+        self.committed_lines.append(f"[{speaker}]: {text}")
+        self._record(speaker, text, "committed")
+
+    def _commit_stale(self, now: float) -> bool:
+        stale = [
+            (sp, tr)
+            for sp, tr in self.tracks.items()
+            if now - tr["ts"] >= self.debounce
+        ]
+        if not stale:
+            return False
+        for speaker, track in sorted(stale, key=lambda kv: kv[1]["ts"]):
+            self._commit_line(speaker, track["text"])
+            del self.tracks[speaker]
+        return True
+
+    def _commit_all_tracks(self):
+        for speaker, track in sorted(self.tracks.items(), key=lambda kv: kv[1]["ts"]):
+            self._commit_line(speaker, track["text"])
+        self.tracks = {}
+
     def check_snapshot(self, force_flush=False) -> dict | None:
+        if force_flush:
+            self._commit_all_tracks()
+
         count = self._count_words()
         elapsed = time.time() - self.last_activity_time
 
@@ -106,12 +218,6 @@ class CaptureManager:
         )
 
         if is_volume or is_silence or (force_flush and count > 0):
-            if self.active_line:
-                self.committed_lines.append(
-                    f"[{self.active_speaker}]: {self.active_line}"
-                )
-                self.active_line = ""
-                self.active_speaker = ""
             return self._commit_block(count)
         return None
 
@@ -155,13 +261,16 @@ class CaptureManager:
 
     def get_live_view(self) -> str:
         current_view = list(self.committed_lines[-8:])
-        if self.active_line:
-            current_view.append(f"[{self.active_speaker}]: {self.active_line}")
+        for speaker, track in sorted(self.tracks.items(), key=lambda kv: kv[1]["ts"]):
+            current_view.append(f"[{speaker}]: {track['text']}")
 
         raw_buffer = "\n".join(current_view)
         if self.glossary:
             return self.glossary.apply_live_corrections(raw_buffer)
         return raw_buffer
+
+    def seconds_since_caption(self) -> float:
+        return time.time() - self.last_caption_time
 
 
 def create_capture_source(platform: str) -> CaptureSource:
@@ -231,7 +340,12 @@ def start_capture(
     on_live_callback,
     stop_event: threading.Event,
     on_meeting_name_callback=None,
+    diag_dir: str | None = None,
+    read_all_nodes: bool = True,
+    on_status_callback=None,
 ):
+    from .recorder import RawRecorder
+
     block_queue = queue.Queue()
 
     def dispatch_worker():
@@ -247,7 +361,10 @@ def start_capture(
     dispatch_thread.start()
 
     source.initialize()
-    manager = CaptureManager(source, glossary_processor)
+    recorder = RawRecorder(diag_dir) if diag_dir else None
+    manager = CaptureManager(
+        source, glossary_processor, recorder=recorder, read_all_nodes=read_all_nodes
+    )
 
     if on_meeting_name_callback:
         try:
@@ -255,13 +372,29 @@ def start_capture(
             if name:
                 on_meeting_name_callback(name)
         except Exception:
-            pass
+            logger.debug("get_meeting_name failed", exc_info=True)
 
+    warn_after = CAPTURE_DEFAULTS["no_caption_warn_sec"]
+    warned = False
     try:
         while not stop_event.is_set():
             if manager.update():
+                warned = False
                 if on_live_callback:
                     on_live_callback(manager.get_live_view())
+            elif on_status_callback and not warned:
+                # Window present but no captions for a while → likely structure
+                # change or captions off, not just silence.
+                if manager.seconds_since_caption() > warn_after:
+                    try:
+                        if source.is_available():
+                            on_status_callback(
+                                "Ventana encontrada pero sin subtítulos. "
+                                "¿Subtítulos activados? Usa 🩺 para diagnosticar."
+                            )
+                            warned = True
+                    except Exception:
+                        logger.debug("availability check failed", exc_info=True)
 
             payload = manager.check_snapshot()
             if payload:
@@ -271,5 +404,7 @@ def start_capture(
         final = manager.flush()
         if final:
             block_queue.put(final)
+        if recorder:
+            recorder.close()
         source.cleanup()
         dispatch_thread.join(timeout=2)

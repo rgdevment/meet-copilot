@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "meet-copilot",
   "name": "Meet Copilot Pro",
-  "description": "Asistente de escritorio que captura subtitulos de Teams/Zoom y genera documentacion tecnica con IA en tiempo real.",
+  "description": "Asistente de escritorio que captura subtitulos de Teams/Zoom, los traduce en vivo y genera una minuta tecnica con IA al cerrar la reunion.",
   "category": "Productivity",
   "requirements": {
     "runtime": "python>=3.10",
