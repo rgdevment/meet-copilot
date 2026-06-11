@@ -18,5 +18,10 @@
     "command": ".venv\\Scripts\\python.exe main.py"
   },
   "version": ".venv\\Scripts\\python.exe main.py --version",
+  "artifacts": [
+    { "label": "Minutas tecnicas", "path": "reuniones_logs", "pattern": "**/*_MINUTA.md", "limit": 0 },
+    { "label": "Transcripciones crudas", "path": "reuniones_logs", "pattern": "**/*_RAW_FORENSE.txt", "limit": 0 },
+    { "label": "Diagnosticos de captura", "path": "reuniones_logs/_diag", "pattern": "*", "limit": 0 }
+  ],
   "elevated": false
 }

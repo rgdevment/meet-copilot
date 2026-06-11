@@ -154,7 +154,12 @@ class ProcessingPipeline:
             except Exception as e:
                 self.gui_queue.put(("status", f"Pipeline Error: {e}"))
 
-        self._finalize()
+        try:
+            self._finalize()
+        except Exception:
+            # The GUI waits on shutdown_complete to close — never leave it hanging.
+            logger.warning("Finalize failed", exc_info=True)
+            self.gui_queue.put(("shutdown_complete", None))
 
     def _process_packet(self, packet: dict):
         ts = packet.get("ts", "00:00")

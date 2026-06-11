@@ -317,8 +317,8 @@ class MeetingApp(ctk.CTk):
             self.topic_label.configure(text=f"📌 Note added: {note[:60]}")
 
     def _poll_queue(self):
-        if self._is_shutting_down:
-            return
+        # Keep polling during shutdown: the close handshake arrives as a
+        # "shutdown_complete" message and must still be received here.
         try:
             while True:
                 action, data = self.gui_queue.get_nowait()
@@ -356,8 +356,9 @@ class MeetingApp(ctk.CTk):
 
         except queue.Empty:
             pass
-        if not self._is_shutting_down:
-            self.after(100, self._poll_queue)
+        # Always reschedule; the loop ends only when shutdown_complete destroys
+        # the window (its branch returns before reaching here).
+        self.after(100, self._poll_queue)
 
     def _safe_destroy(self):
         try:
