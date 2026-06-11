@@ -2,6 +2,12 @@ import queue
 import sys
 import threading
 
+__version__ = "2.0"
+
+if "--version" in sys.argv:
+    print(__version__)
+    sys.exit(0)
+
 REQUIRED_PACKAGES = {
     "openai": "openai",
     "anthropic": "anthropic",

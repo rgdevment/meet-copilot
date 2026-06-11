@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "meet-copilot",
+  "name": "Meet Copilot Pro",
+  "description": "Asistente de escritorio que captura subtitulos de Teams/Zoom y genera documentacion tecnica con IA en tiempo real.",
+  "category": "Productivity",
+  "requirements": {
+    "runtime": "python>=3.10",
+    "system": []
+  },
+  "provision": {
+    "strategy": "ManagedEnv",
+    "command": "uv venv && uv pip install -r requirements.txt"
+  },
+  "preflight": ".venv\\Scripts\\python.exe doctor.py",
+  "launch": {
+    "kind": "Interpreter",
+    "command": ".venv\\Scripts\\python.exe main.py"
+  },
+  "version": ".venv\\Scripts\\python.exe main.py --version",
+  "elevated": false
+}
